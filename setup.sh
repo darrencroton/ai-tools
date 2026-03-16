@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ~/Documents/AI/setup.sh  (lives in iCloud Drive — synced automatically across Macs)
+# ~/Documents/AI Tools/setup.sh  (lives in iCloud Drive — synced automatically across Macs)
 #
 # Wires up the cross-platform AI agent configuration on any machine.
 # Safe to re-run — skips anything already configured, warns on conflicts.
 #
 # ── What this sets up ────────────────────────────────────────────────────────
 #
-#   iCloud Drive ~/Documents/AI/   ← single source of truth (this directory)
+#   iCloud Drive ~/Documents/AI Tools/   ← single source of truth (this directory)
 #   ├── AGENTS.md                    global instructions for all AI tools
 #   ├── setup.sh                     this script
 #   ├── tools.conf                   registered AI tools (edit to add new ones)
@@ -14,7 +14,7 @@
 #       ├── commit/                  (e.g.) git commit workflow skill
 #       └── handoff/                 (e.g.) session handoff skill (cross-platform)
 #
-#   ~/.agents/              → ~/Documents/AI/           (symlink, created manually)
+#   ~/.agents/              → ~/Documents/AI Tools/     (symlink, created manually)
 #   ~/.claude/CLAUDE.md     → ~/.agents/AGENTS.md       (per tools.conf)
 #   ~/.codex/AGENTS.md      → ~/.agents/AGENTS.md       (per tools.conf)
 #   ~/.claude/skills        → ~/.agents/skills/          (whole dir, all tools)
@@ -23,21 +23,21 @@
 # ── New machine setup (two commands) ─────────────────────────────────────────
 #
 #   Prerequisites: AI tools installed and signed in,
-#                  iCloud Drive synced so ~/Documents/AI/ is available.
+#                  iCloud Drive synced so ~/Documents/AI Tools/ is available.
 #
-#   ln -s "$HOME/Documents/AI" ~/.agents
+#   ln -s "$HOME/Documents/AI Tools" ~/.agents
 #   bash ~/.agents/setup.sh
 #
 # ── Adding a new AI tool (e.g. Gemini) ───────────────────────────────────────
 #
-#   1. Add a line to ~/Documents/AI/tools.conf:
+#   1. Add a line to ~/Documents/AI Tools/tools.conf:
 #        ~/.gemini    GEMINI.md
 #   2. Re-run: bash ~/.agents/setup.sh
 #   No other changes needed.
 #
 # ── Adding new skills ─────────────────────────────────────────────────────────
 #
-#   Drop a new skill directory into ~/Documents/AI/skills/.
+#   Drop a new skill directory into ~/Documents/AI Tools/skills/.
 #   No re-run needed — the whole skills dir is symlinked, so it appears
 #   in all tools instantly.
 #
@@ -69,7 +69,7 @@ echo ""
 if [[ ! -L "$AGENTS_DIR" ]]; then
     echo "ERROR: ~/.agents is not a symlink."
     echo "Create it first, then re-run:"
-    echo "  ln -s \"\$HOME/Documents/AI\" ~/.agents"
+    echo "  ln -s \"\$HOME/Documents/AI Tools\" ~/.agents"
     exit 1
 fi
 
