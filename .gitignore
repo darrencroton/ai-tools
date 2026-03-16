@@ -1,0 +1,31 @@
+# Repository scope
+# Keep the repo focused on your hand-written shared config and skills.
+skills/ai-orchestrator/
+skills/pdf/
+skills/.system/
+
+# macOS / editor noise
+.DS_Store
+**/.DS_Store
+
+# Python cache / bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment files
+.env
+.env.*
+
+# Logs and transient runtime files
+*.log
+*.lock
+*.tmp
+
+# Local automation / workspace artefacts
+ignore/
