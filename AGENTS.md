@@ -25,5 +25,5 @@ These instructions apply to all projects across all AI coding assistants (Claude
 
 ## File Organisation
 
-- Never delete files — archive to `ignore/` subdirectories in project root (create `ignore/` if needed; add to `.gitignore` if working in a repo)
+- Never delete files — archive to `archive/` subdirectories in project root (create `archive/` if needed; add to `.gitignore` if working in a repo)
 - Write reports to the `docs/` directory (default) or Obsidian (if asked) → use `obsidian-inbox/` directory
