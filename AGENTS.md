@@ -8,6 +8,7 @@ These instructions apply to all projects across all AI coding assistants (Claude
 
 - Work to the highest professional coding standards at all times
 - Write documentation as you go
+- If available, use subagents to run full test suites when required
 - Check exit codes after every execution and report failures immediately
 - Never simplify failing tests — they indicate real problems that must be fixed
 
