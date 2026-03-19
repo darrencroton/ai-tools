@@ -1,6 +1,7 @@
 ---
 name: report
-description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Use when the user has asked you to produce a plan, proposal, investigation report, codebase exploration summary, execution-trace write-up, bug hunt or root-cause analysis, comparison, assessment, final report, or concise status update instead of free-form prose.
+description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Use when the user asks you to "write a report" or similar (e.g. produce a plan, proposal, investigation report, codebase exploration summary, execution-trace write-up, bug hunt or root-cause analysis, comparison, assessment, final report, or concise status update), but not when the user simply wants you to "report back".
+
 ---
 
 # Report

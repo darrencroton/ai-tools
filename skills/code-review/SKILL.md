@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Perform a professional, comprehensive code review of completed work. Use when the user asks to review a diff, commit, branch, directory, or implementation relative to a plan, spec, ticket, or stated requirements. Default for requests like "review this change", "review my implementation", or "check this code update". Focus on line-specific findings, risk-based depth, and explicit attention to correctness, safety, tests, and scientific C/C++/Python concerns.
+description: Perform a professional, comprehensive code review of completed work. Use when the user asks to perform a code review. Focus on line-specific findings, risk-based depth, and explicit attention to correctness, safety, tests, and scientific C/C++/Python concerns.
 ---
 
 # Professional Code Review
