@@ -1,6 +1,6 @@
 ---
 name: report
-description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Use only when the user specifically asks to use the report skill.
+description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Only use when the user explicitly asks to use this report skill, otherwise skip.
 
 ---
 
