@@ -12,7 +12,7 @@ Summarise the science paper at: $ARGUMENTS
 1. If `$ARGUMENTS` is a local file path, use the Read tool to read the PDF.
 2. If `$ARGUMENTS` is a URL, use WebFetch to retrieve the paper content.
 3. Generate a structured markdown summary following the Output Format below.
-4. Print the summary directly in the conversation — do not save to a file unless the user asks.
+4. Output only the markdown summary — no preamble, commentary, or surrounding text. If the user specifies a file path, write to that file; otherwise print in the conversation.
 
 ## Output Format
 
@@ -46,6 +46,11 @@ Each section gets up to 3 bullet points. Every bullet **must** end with an inlin
 
 Omit any section that genuinely does not apply to the paper (e.g. no distinct Data section in a purely theoretical paper). Do not add a placeholder.
 
+**Quality gate — do not return the summary until:**
+- Every bullet accurately reflects the paper content (no paraphrase that changes meaning, no invented detail)
+- Every bullet carries a valid inline citation traceable to a specific location in the paper
+- No bullet is left uncited under any circumstance
+
 ### Glossary
 
 A 2-column markdown table with headers **Term** and **Definition**, covering specialised terms, acronyms, and domain-specific concepts introduced or relied upon in the paper. No row limit.
@@ -56,3 +61,4 @@ A 2-column markdown table with headers **Term** and **Definition**, covering spe
 - Render equations in LaTeX: inline `$...$` or display `$$...$$`
 - No tags section
 - No footnotes or reference list at the end — all citations are inline within each bullet
+- Citations are non-negotiable: every bullet must have one; omit a bullet entirely rather than write it without a traceable source
