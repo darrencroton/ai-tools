@@ -10,7 +10,7 @@ Summarise the science paper at: $ARGUMENTS
 ## Steps
 
 1. If `$ARGUMENTS` is a local file path, use the Read tool to read the PDF.
-2. If `$ARGUMENTS` is a URL, use WebFetch to retrieve the paper content.
+2. If `$ARGUMENTS` is a URL, use a WebFetch tool to retrieve the paper content.
 3. Draft a structured markdown summary following the Output Format below.
 4. Perform a review pass over the draft before outputting (see Review Pass below).
 5. Output only the final markdown summary — no preamble, commentary, or surrounding text.
