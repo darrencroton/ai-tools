@@ -12,7 +12,9 @@ Summarise the science paper at: $ARGUMENTS
 1. If `$ARGUMENTS` is a local file path, use the Read tool to read the PDF.
 2. If `$ARGUMENTS` is a URL, use WebFetch to retrieve the paper content.
 3. Generate a structured markdown summary following the Output Format below.
-4. Output only the markdown summary — no preamble, commentary, or surrounding text. If the user specifies a file path, write to that file; otherwise print in the conversation.
+4. Output only the markdown summary — no preamble, commentary, or surrounding text. 
+5. If the user specifies a file path, write to that file; otherwise print in the conversation.
+6. When writing to file, derive the filename as **`Author(s) - Year - Title.md`** (1 author: surname only; 2 authors: `A and B`; 3+: `A et al`; title truncated to 80 chars, unsafe characters removed).
 
 ## Output Format
 
