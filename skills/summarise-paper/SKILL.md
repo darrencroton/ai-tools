@@ -21,10 +21,10 @@ Summarise the science paper at: $ARGUMENTS
 
 Before outputting, re-read the paper and check the draft against it:
 
-1. **Coverage** — re-read the abstract, conclusions, and all section headings; confirm no central contribution, key result, or major finding is absent from the summary; add missing content as new bullets if needed.
+1. **Coverage** — re-read the abstract, conclusions, and all section headings; confirm no central contribution, key result, or major finding is absent from the summary; add missing content as extra bullets if needed.
 2. **Accuracy** — verify each bullet against its footnote quote; reject any bullet where the paraphrase goes beyond or misrepresents what the quote actually says; rewrite or drop it.
 3. **Quote fidelity** — confirm every footnote quote is verbatim (character-for-character from the paper), not a paraphrase; correct any that are not exact.
-4. **Glossary completeness** — check that every technical term, acronym, or domain-specific concept used in the bullets appears in the Glossary; add any that are missing.
+4. **Glossary completeness** — ensure all relevant glossary terms specific to the paper's context are included; add any that are missing.
 
 Only output the summary once all four checks pass.
 
@@ -37,7 +37,7 @@ Produce a single markdown document with these sections in order.
 ```
 # <Paper Title>
 
-Authors: <Author list>
+Authors: <Author list> (full list comprising full names, comma separated)
 
 Published: <Month Year> ([Link](<URL>))
 ```
@@ -46,7 +46,7 @@ Only include the link if an arXiv ID or DOI is present in the paper; otherwise o
 
 ### Sections
 
-Each section gets up to 3 bullet points. Every bullet **must** carry a footnote marker (`[^1]`, `[^2]`, etc.) linking it to a verbatim supporting quote in the References section. No bullet without a footnote. Assign footnote numbers sequentially across the entire document.
+Each section gets up to 3 bullet points written in your own words. Every bullet **must** carry a footnote marker (`[^1]`, `[^2]`, etc.) linking it to a verbatim supporting quote in the References section. No bullet without a footnote. Assign footnote numbers sequentially across the entire document.
 
 - **Key Ideas** — the central contributions or claims of the paper
 - **Introduction** — context, motivation, and problem statement
