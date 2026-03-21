@@ -29,3 +29,5 @@ env/
 
 # Local automation / workspace artefacts
 ignore/
+.claude/
+.agents/
