@@ -1,6 +1,6 @@
 ---
 name: summarise-paper
-description: Summarise a science paper from a local PDF path or URL. Usage: /summarise-paper <path-or-url>
+description: Summarise a science paper from a local PDF path or URL. Use only when specifically asked.
 ---
 
 ## Task
