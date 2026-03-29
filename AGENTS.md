@@ -26,4 +26,4 @@ These instructions apply to all projects across all AI coding assistants (Claude
 ## File Organisation
 
 - Never delete files — archive to `archive/` subdirectories in the project root (create `archive/` if needed; add to `.gitignore` if working in a repo)
-- Write reports to the `docs/` directory (default) or Obsidian (if asked) → use `obsidian-inbox/` directory
+- When asked to create a Markdown report write to the `docs/` directory (default) or Obsidian (if told) → use `obsidian-inbox/` directory
