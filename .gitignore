@@ -28,6 +28,6 @@ env/
 *.tmp
 
 # Local automation / workspace artefacts
-ignore/
+private/
 .claude/
 .agents/
