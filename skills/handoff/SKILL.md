@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Create a compact, high-signal handoff for continuing in another chat or coding agent. Use when the user says "handoff", wants to switch tools, or is nearing usage limits and needs the next agent to resume work mid-stream without redoing discovery.
+description: Create a compact, high-signal handoff for continuing in another chat or coding agent. Use when the user says "handoff".
 ---
 
 ## Principles
@@ -9,7 +9,7 @@ Preserve momentum — the next agent must know exactly what to do first. Prefer 
 
 ## Output
 
-Write or update `HANDOFF.md` in the project root unless the user requests a different file. If it already exists, update in place — keep still-relevant context, remove stale items.
+Write or update `HANDOFF.md` in the project root unless the user requests a different file. If it already exists, update in place — keep still-relevant context, remove stale items. Do not commit the handoff unless told or already part of the repo.
 
 ## Modes
 
