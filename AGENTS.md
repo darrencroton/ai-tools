@@ -19,6 +19,7 @@ These instructions apply to all projects across all AI coding assistants (Claude
 - Never use `--no-verify` or bypass hooks
 - Never amend a previous commit — always create a new one
 - Always ask the user before committing; never commit without explicit approval
+- Commit to the branch currently being worked on — do not auto-create a new branch (including off `main`) unless explicitly told to
 - Commit messages must be meaningful, list every changed file with reasons, grouped logically
 
 ---
@@ -27,3 +28,9 @@ These instructions apply to all projects across all AI coding assistants (Claude
 
 - Never delete files — archive to `archive/` subdirectories in the project root (create `archive/` if needed; add to `.gitignore` if working in a repo)
 - When asked to create a Markdown report write to the `docs/` directory (default) or Obsidian (if told) → use `obsidian-inbox/` directory
+
+---
+
+## Writing & Markdown
+
+- When writing Markdown do NOT hard-wrap or truncate prose — modern Markdown readers soft-wrap automatically, and manual wrapping renders poorly and is hard to read/edit.
