@@ -87,7 +87,7 @@ Use this structure. For Quick Mode, omit sections that do not apply.
 - The exact first thing the next agent should do.
 
 ## Resume Prompt
-Continue this task using `HANDOFF.md` as the source of truth. Do not redo discovery. First perform the `Next Action`, then continue remaining work and update `HANDOFF.md` if the plan changes.
+Continue this task using `HANDOFF.md` as the source of truth. First perform the `Next Action`, then continue remaining work and update `HANDOFF.md` if the plan changes.
 ```
 
 ## Next Action Standard
@@ -183,5 +183,5 @@ Add only when they provide real value:
 - Update `src/routes/admin.ts` to use the new validator behind the existing fallback, then run `tests/auth/integration.test.ts`.
 
 ## Resume Prompt
-Continue this migration using `HANDOFF.md` as the source of truth. Do not redo discovery. First update `src/routes/admin.ts` to use the new validator behind the existing fallback, then run `tests/auth/integration.test.ts`.
+Continue this migration using `HANDOFF.md` as the source of truth. First update `src/routes/admin.ts` to use the new validator behind the existing fallback, then run `tests/auth/integration.test.ts`.
 ```
