@@ -18,7 +18,7 @@ Produce a senior-level review that is evidence-based, risk-driven, and difficult
 From the user message and local context, identify:
 
 - **Review target**: diff, commit, branch, files, directory, or completed task
-- **Requirement source**: plan, spec, ticket, issue, paper, docs, or explicit user criteria
+- **Requirement source**: frozen contract, plan, spec, ticket, issue, paper, docs, or explicit user criteria
 - **Project rules**: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING`, test/build conventions
 - **Evidence available**: git diff, tests, benchmarks, logs, docs, configs, generated outputs
 
@@ -44,29 +44,36 @@ Every review must do all of the following:
 - If there is no usable git context, review the supplied files directly and say so.
 - Identify high-risk files first: core algorithms, public APIs, memory management, concurrency, I/O, configs, tests, and build files.
 
-### 2. Establish expected behaviour
+### 2. Run authorization gate when a frozen contract exists
+- Compare actual changed files/functions/components against the authorized surface before judging code quality.
+- Identify behaviour added, behaviour removed, test changes, and new coupling.
+- Treat unapproved scope drift as a finding. Severity depends on impact: use `P0` for definite safety/data/security/contract breakage, `P1` for material unapproved behaviour or risky surface expansion, and `P2` for lower-risk authorization gaps.
+- Do not excuse drift because the resulting code is locally reasonable.
+
+### 3. Establish expected behaviour
 - Extract acceptance criteria from the plan/spec/ticket when present.
 - If no formal spec exists, infer intended behaviour from tests, docs, code structure, and the user request.
 - State important assumptions when they materially affect confidence.
 
-### 3. Run the review matrix
+### 4. Run the review matrix
 - Use [references/review-matrix.md](references/review-matrix.md).
 - Every review must explicitly consider correctness, failure handling, tests, and maintainability.
 - Add the scientific and language-specific checks from [references/scientific-and-language-priorities.md](references/scientific-and-language-priorities.md) when relevant.
 
-### 4. Use supporting validation when it is proportionate
+### 5. Use supporting validation when it is proportionate
 - When cheap and relevant, run targeted tests, builds, linters, or static analysis to validate or falsify review hypotheses.
 - For C and C++, treat compiler warnings and sanitizers as supporting evidence, not as substitutes for reasoning.
 - For scientific and numerical changes, prefer targeted regression tests, reference-data checks, or benchmark comparisons when available.
 
-### 5. Separate findings from uncertainty
+### 6. Separate findings from uncertainty
 - Report confirmed defects and clear risks as findings.
 - Put ambiguous concerns under `Open Questions / Assumptions`, not as hard findings.
 - Do not report untouched pre-existing issues unless the current change interacts with them.
 
-### 6. Validate review depth
+### 7. Validate review depth
 Before finishing, ask:
 
+- Did I compare the actual change set with the frozen contract if one exists?
 - Did I inspect all changed files?
 - Did I inspect the relevant tests?
 - Did I follow risky interfaces beyond the diff?
@@ -99,9 +106,15 @@ Good finding: specific, reproducible, and tied to real engineering risk.
 
 ## Required Output
 
-Start with findings, ordered by severity.
+When a frozen contract exists, start with `Authorization Gate`, then list findings ordered by severity. When no frozen contract exists, start with findings as usual.
 
 ```md
+## Authorization Gate
+- Intended slice:
+- Authorized surface:
+- Actual changed surface:
+- Drift verdict: PASS / FAIL / PASS WITH RISKS
+
 ## Findings
 
 1. [P1] `path/to/file:123` Title

@@ -1,6 +1,6 @@
 ---
 name: report
-description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Only use when the user explicitly asks to use this report skill, otherwise skip.
+description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Use only when the user explicitly asks for this report skill, a report, a status report, or a final report. For implementation planning, use implementation-plan instead.
 
 ---
 
@@ -15,7 +15,6 @@ Follow this sequence:
 1. Classify the request into the lightest report mode that fits.
 2. Read [references/common-report-contract.md](references/common-report-contract.md).
 3. Read the matching mode template:
-   - [references/template-plan.md](references/template-plan.md)
    - [references/template-investigation.md](references/template-investigation.md)
    - [references/template-bug-hunt.md](references/template-bug-hunt.md)
    - [references/template-comparison.md](references/template-comparison.md)
@@ -31,7 +30,6 @@ Choose exactly one primary mode unless the user explicitly asks for a hybrid rep
 
 If the task spans two modes, choose the mode that matches the primary deliverable and explicitly import the essential sections from the secondary mode. Example: an investigation that ends in a recommended implementation can stay in `investigation` mode while adding the necessary planning sections.
 
-- `plan`: new features, implementation proposals, design choices, phased rollout plans
 - `investigation`: codebase exploration, behaviour tracing, execution path analysis, system understanding
 - `bug-hunt`: defect isolation, regressions, incident analysis, root-cause analysis
 - `comparison`: compare implementations, options, branches, libraries, architectures, or observed behaviours
@@ -39,10 +37,10 @@ If the task spans two modes, choose the mode that matches the primary deliverabl
 - `quick-update`: short status report where a full report would be unnecessarily heavy
 
 If the request is "find out how this works," default to `investigation`.
-If the request is "what should we build," default to `plan`.
 If the request is "why is this broken," default to `bug-hunt`.
 If the request is "which option is better," default to `comparison`.
 If the request is "summarize what was done," default to `final-report`.
+If the request is "what should we build" or asks for an implementation plan, use `implementation-plan` instead of this skill.
 
 ## Evidence Standard
 
@@ -70,7 +68,6 @@ Write reports to `docs/` by default only when the user asks for a document or fi
 
 Do not conclude early. A report is complete only when its required sections and gate checks are satisfied.
 
-- `plan`: include goals, non-goals, constraints, recommended approach, implementation phases, and validation plan
 - `investigation`: include the question, evidence trail, current understanding, and remaining unknowns
 - `bug-hunt`: include symptom, impact, reproduction status, root-cause confidence, and next actions
 - `comparison`: define comparison criteria before recommending an option

@@ -29,6 +29,7 @@ Always:
 - blockers and dependencies
 - files changed or examined
 - validation run and validation still needed
+- frozen contract, authorized surface, and authorization gate status when the task used implementation-plan or scoped-implementation
 
 When relevant:
 - branch name
@@ -67,6 +68,9 @@ Use this structure. For Quick Mode, omit sections that do not apply.
 ## Decisions Made
 - Confirmed decisions the next agent should not re-litigate unless new evidence appears.
 
+## Frozen Contract
+- Intended slice, authorized files/functions, tests, non-goals, risky surfaces, and rollback path if a scoped implementation contract exists.
+
 ## Failed or Rejected Approaches
 - Attempts that did not work and why.
 
@@ -82,6 +86,10 @@ Use this structure. For Quick Mode, omit sections that do not apply.
 ## Validation
 - Tests, lint, builds, or manual checks already run, with results.
 - Checks still needed.
+
+## Authorization Gate
+- Actual changed surface versus authorized surface.
+- Drift status: none, fixed, approved, or unresolved.
 
 ## Next Action
 - The exact first thing the next agent should do.
