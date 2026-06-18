@@ -1,0 +1,1237 @@
+#!/usr/bin/env python3
+"""ai-reminder: inject timed focus reminders into an active Codex or Claude tmux pane.
+
+This tool monitors transcript activity for a Codex or Claude session and sends reminder
+text into the matching tmux pane only while the agent appears to be actively working. It
+is intended for long-running coding sessions where the assistant should periodically be
+reminded to stay aligned with the task, plan, and operating instructions.
+
+Prerequisites:
+- `tmux` must be installed and the target pane must already exist.
+- The pane must be running Codex or Claude, or `--tool` must identify the correct tool.
+- The relevant transcript directory must be accessible.
+
+What it does:
+- Resolves a tmux pane automatically or from an explicit `--pane` target.
+- Detects whether the pane is running Codex or Claude, or uses `--tool` if supplied.
+- Maps the pane to the newest matching transcript file.
+- Treats recent transcript activity as evidence that the agent is still active.
+- Injects reminder text on a configurable interval while the session remains active.
+- Persists status, pid, config, and logs under a state directory for later inspection.
+
+Primary commands:
+- `start`: launch the monitor in the background.
+- `run`: run the monitor in the foreground.
+- `stop`: stop the current background monitor.
+- `status`: inspect the current monitor state.
+
+State command options:
+- `stop --state-dir PATH`: stop a monitor using a non-default state directory.
+- `status --state-dir PATH`: inspect a monitor using a non-default state directory.
+- `status --json`: emit machine-readable JSON status.
+
+Monitor options for `start` and `run`:
+- `--tool {auto,codex,claude}`: choose the tool or let ai-reminder infer it.
+- `--pane PANE`: target a specific tmux pane such as `%3` or `codex:0.0`.
+- `--tmux-session NAME`: limit auto-discovery to one tmux session.
+- `--transcript-root PATH`: override the default transcript root.
+- `--transcript PATH`: monitor one explicit transcript file.
+- `--session-id ID`: prefer transcripts matching a specific session id.
+- `--reminder-text TEXT`: text to inject into the pane.
+- `--interval SECONDS`: seconds between reminders while active.
+- `--active-window SECONDS`: how recent transcript activity must be to count as active.
+- `--poll-interval SECONDS`: delay between monitor loop iterations.
+- `--scan-interval SECONDS`: delay between transcript re-resolution scans.
+- `--state-dir PATH`: override the directory used for pid, status, config, and logs.
+- `--debug`: log transcript indexing details.
+
+Interval rule:
+- `--interval` must be greater than `--active-window`.
+- With the default active window of 45 seconds, the minimum interval is 46 seconds.
+
+Environment variables:
+- `AI_REMINDER_STATE_DIR`
+- `AI_REMINDER_REMINDER_TEXT`
+- `AI_REMINDER_INTERVAL`
+- `AI_REMINDER_ACTIVE_WINDOW`
+- `AI_REMINDER_POLL_INTERVAL`
+- `AI_REMINDER_SCAN_INTERVAL`
+
+Examples:
+- `ai-reminder start --tool codex`
+- `ai-reminder start --tool claude --interval 120`
+- `ai-reminder run --pane %3 --interval 90`
+- `ai-reminder status --json`
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from textwrap import dedent
+from typing import Any, Iterable
+
+
+APP_NAME = "ai-reminder"
+DEFAULT_REMINDER_TEXT = (
+    "[ai-reminder] Re-check the task, current plan, and delegation before continuing."
+)
+DEFAULT_REMINDER_INTERVAL = 240
+DEFAULT_ACTIVE_WINDOW = 45
+DEFAULT_POLL_INTERVAL = 2.0
+DEFAULT_SCAN_INTERVAL = 10.0
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / APP_NAME
+DEFAULT_CODEX_ROOT = Path.home() / ".codex" / "sessions"
+DEFAULT_CLAUDE_ROOT = Path.home() / ".claude" / "projects"
+
+
+class MonitorError(RuntimeError):
+    """Raised for expected operational errors."""
+
+
+@dataclass(frozen=True)
+class PaneInfo:
+    pane_id: str
+    target: str
+    session_name: str
+    window_name: str
+    pane_title: str
+    current_path: str
+    current_command: str
+    pane_pid: int
+    pane_dead: bool
+
+
+@dataclass(frozen=True)
+class TranscriptMeta:
+    path: str
+    cwd: str | None
+    session_id: str | None
+    mtime: float
+
+
+@dataclass(frozen=True)
+class MonitorConfig:
+    tool: str
+    pane_id: str
+    pane_target: str
+    pane_cwd: str
+    reminder_text: str
+    reminder_interval: int
+    active_window: int
+    poll_interval: float
+    scan_interval: float
+    transcript_root: str
+    transcript_path: str | None
+    session_id: str | None
+    state_dir: str
+    log_file: str
+    started_at: str
+    debug: bool
+
+
+class ToolSpec:
+    def __init__(self, name: str, default_root: Path, command_names: tuple[str, ...]):
+        self.name = name
+        self.default_root = default_root
+        self.command_names = command_names
+
+    def extract_metadata(self, record: dict[str, Any]) -> tuple[str | None, str | None]:
+        raise NotImplementedError
+
+    def is_activity(self, record: dict[str, Any]) -> bool:
+        raise NotImplementedError
+
+
+class CodexSpec(ToolSpec):
+    def __init__(self) -> None:
+        super().__init__("codex", DEFAULT_CODEX_ROOT, ("codex",))
+
+    def extract_metadata(self, record: dict[str, Any]) -> tuple[str | None, str | None]:
+        record_type = record.get("type")
+        payload = record.get("payload")
+        if record_type == "session_meta" and isinstance(payload, dict):
+            return payload.get("cwd"), payload.get("id")
+        if record_type == "turn_context" and isinstance(payload, dict):
+            return payload.get("cwd"), None
+        return None, None
+
+    def is_activity(self, record: dict[str, Any]) -> bool:
+        record_type = record.get("type")
+        payload = record.get("payload")
+        if record_type in {"session_meta", "turn_context"}:
+            return False
+        if record_type == "event_msg" and isinstance(payload, dict):
+            return payload.get("type") not in {"user_message"}
+        if record_type == "response_item" and isinstance(payload, dict):
+            payload_type = payload.get("type")
+            if payload_type == "message":
+                return payload.get("role") == "assistant"
+            return True
+        return False
+
+
+class ClaudeSpec(ToolSpec):
+    def __init__(self) -> None:
+        super().__init__("claude", DEFAULT_CLAUDE_ROOT, ("claude",))
+
+    def extract_metadata(self, record: dict[str, Any]) -> tuple[str | None, str | None]:
+        cwd = record.get("cwd")
+        session_id = record.get("sessionId") or record.get("session_id")
+        return cwd, session_id
+
+    def is_activity(self, record: dict[str, Any]) -> bool:
+        record_type = record.get("type")
+        if record_type in {"assistant", "queue-operation", "result"}:
+            return True
+        if record_type != "user":
+            return False
+
+        if record.get("toolUseResult") is not None:
+            return True
+
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return False
+
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    return True
+        return False
+
+
+TOOL_SPECS: dict[str, ToolSpec] = {
+    "codex": CodexSpec(),
+    "claude": ClaudeSpec(),
+}
+
+
+def env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value if value is not None else default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise MonitorError(f"Environment variable {name} must be an integer.") from exc
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise MonitorError(f"Environment variable {name} must be a number.") from exc
+
+
+def default_state_dir() -> Path:
+    return Path(env_str("AI_REMINDER_STATE_DIR", str(DEFAULT_STATE_DIR))).expanduser()
+
+
+def default_reminder_text() -> str:
+    return env_str("AI_REMINDER_REMINDER_TEXT", DEFAULT_REMINDER_TEXT)
+
+
+def minimum_interval(active_window: int) -> int:
+    return active_window + 1
+
+
+def top_level_description() -> str:
+    return dedent(
+        """\
+        Monitor a Codex or Claude tmux pane and inject reminder text only while recent
+        transcript activity shows the agent is still working.
+
+        Use `start` for a background monitor, `run` for foreground operation, `status` to
+        inspect the current state, and `stop` to terminate a running background monitor.
+        """
+    ).strip()
+
+
+def top_level_epilog() -> str:
+    return dedent(
+        f"""\
+        Commands:
+          start   Start the monitor in the background.
+          run     Run the monitor in the foreground.
+          stop    Stop the running monitor. Options: --state-dir
+          status  Show monitor status. Options: --state-dir, --json
+
+        Monitor options for `start` and `run`:
+          --tool {{auto,codex,claude}}   Choose the tool or auto-detect it from the pane.
+          --pane PANE                    Target a specific tmux pane, for example `%3`.
+          --tmux-session NAME            Restrict auto-discovery to one tmux session.
+          --transcript-root PATH         Override the transcript root directory.
+          --transcript PATH              Monitor one explicit transcript file.
+          --session-id ID                Prefer transcripts matching this session id.
+          --reminder-text TEXT           Reminder text injected into the pane.
+          --interval SECONDS             Reminder interval; minimum is active-window + 1.
+          --active-window SECONDS        Activity window used to decide whether work is active.
+          --poll-interval SECONDS        Delay between monitor loop iterations.
+          --scan-interval SECONDS        Delay between transcript re-resolution scans.
+          --state-dir PATH               State directory (default: {default_state_dir()}).
+          --debug                        Log transcript indexing details.
+
+        Environment:
+          AI_REMINDER_STATE_DIR
+          AI_REMINDER_REMINDER_TEXT
+          AI_REMINDER_INTERVAL
+          AI_REMINDER_ACTIVE_WINDOW
+          AI_REMINDER_POLL_INTERVAL
+          AI_REMINDER_SCAN_INTERVAL
+
+        Examples:
+          ai-reminder start --tool codex
+          ai-reminder start --tool claude --interval 120
+          ai-reminder run --pane %3 --interval 90
+          ai-reminder status --json
+          ai-reminder stop
+        """
+    ).strip()
+
+
+def monitor_command_epilog(command_name: str) -> str:
+    run_mode = "background" if command_name == "start" else "foreground"
+    return dedent(
+        f"""\
+        {command_name} runs the monitor in {run_mode} mode.
+
+        Interval rule:
+          --interval must be greater than --active-window.
+          With the default active window ({DEFAULT_ACTIVE_WINDOW}), the minimum interval is
+          {minimum_interval(DEFAULT_ACTIVE_WINDOW)} seconds.
+
+        Example:
+          ai-reminder {command_name} --tool codex --interval 120
+        """
+    ).strip()
+
+
+def state_command_epilog(command_name: str) -> str:
+    action = "stop" if command_name == "stop" else "inspect"
+    return dedent(
+        f"""\
+        Use this command to {action} the monitor described by the files in --state-dir.
+
+        Default state directory:
+          {default_state_dir()}
+        """
+    ).strip()
+
+
+def run_command(
+    args: list[str], *, check: bool = True, capture_output: bool = True
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        args,
+        text=True,
+        capture_output=capture_output,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        command = shlex.join(args)
+        message = result.stderr.strip() or result.stdout.strip() or "command failed"
+        raise MonitorError(f"{command}: {message}")
+    return result
+
+
+def run_tmux(args: list[str], *, check: bool = True) -> str:
+    result = run_command(["tmux", *args], check=check)
+    return result.stdout
+
+
+def path_to_json(path: Path) -> str:
+    return str(path.expanduser().resolve())
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temp_path.replace(path)
+
+
+def append_log(log_path: Path, message: str, *, echo: bool = False) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {message}\n"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+    if echo:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+
+
+def isoformat_utc(timestamp: float | None) -> str | None:
+    if timestamp is None:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def parse_iso_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except ValueError:
+        try:
+            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            ).timestamp()
+        except ValueError:
+            return None
+
+
+def process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def read_pid(pid_path: Path) -> int | None:
+    if not pid_path.exists():
+        return None
+    try:
+        return int(pid_path.read_text().strip())
+    except ValueError:
+        return None
+
+
+def list_tmux_panes() -> list[PaneInfo]:
+    output = run_tmux(
+        [
+            "list-panes",
+            "-a",
+            "-F",
+            "\t".join(
+                [
+                    "#{pane_id}",
+                    "#{session_name}:#{window_index}.#{pane_index}",
+                    "#{session_name}",
+                    "#{window_name}",
+                    "#{pane_title}",
+                    "#{pane_current_path}",
+                    "#{pane_current_command}",
+                    "#{pane_pid}",
+                    "#{pane_dead}",
+                ]
+            ),
+        ]
+    )
+    panes: list[PaneInfo] = []
+    for raw_line in output.splitlines():
+        fields = raw_line.split("\t")
+        if len(fields) != 9:
+            continue
+        pane_pid = int(fields[7]) if fields[7].isdigit() else 0
+        panes.append(
+            PaneInfo(
+                pane_id=fields[0],
+                target=fields[1],
+                session_name=fields[2],
+                window_name=fields[3],
+                pane_title=fields[4],
+                current_path=fields[5],
+                current_command=fields[6],
+                pane_pid=pane_pid,
+                pane_dead=fields[8] == "1",
+            )
+        )
+    return panes
+
+
+def find_pane_by_id(pane_id: str) -> PaneInfo | None:
+    for pane in list_tmux_panes():
+        if pane.pane_id == pane_id:
+            return pane
+    return None
+
+
+def load_process_tree() -> tuple[dict[int, str], dict[int, list[int]]]:
+    output = run_command(["ps", "-axo", "pid=,ppid=,command="]).stdout
+    commands: dict[int, str] = {}
+    children: dict[int, list[int]] = {}
+    for line in output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_text, ppid_text, command = parts
+        try:
+            pid = int(pid_text)
+            ppid = int(ppid_text)
+        except ValueError:
+            continue
+        commands[pid] = command
+        children.setdefault(ppid, []).append(pid)
+    return commands, children
+
+
+def command_basename(command: str) -> str:
+    try:
+        first_token = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        return ""
+    return Path(first_token).name
+
+
+def pane_tools(pane: PaneInfo, process_commands: dict[int, str], children: dict[int, list[int]]) -> set[str]:
+    tool_names: set[str] = set()
+    stack = [pane.pane_pid]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid <= 0:
+            continue
+        seen.add(pid)
+        command = process_commands.get(pid, "")
+        base = command_basename(command)
+        for tool_name, spec in TOOL_SPECS.items():
+            if base in spec.command_names or any(token in command for token in spec.command_names):
+                tool_names.add(tool_name)
+        stack.extend(children.get(pid, []))
+    current = pane.current_command.strip()
+    for tool_name, spec in TOOL_SPECS.items():
+        if current in spec.command_names:
+            tool_names.add(tool_name)
+    return tool_names
+
+
+def resolve_pane(requested_pane: str | None, tmux_session: str | None, tool: str) -> tuple[PaneInfo, str]:
+    panes = list_tmux_panes()
+    if tmux_session:
+        panes = [pane for pane in panes if pane.session_name == tmux_session]
+    if not panes:
+        raise MonitorError("No matching tmux panes were found.")
+
+    process_commands, children = load_process_tree()
+
+    if requested_pane:
+        for pane in panes:
+            if requested_pane in {pane.pane_id, pane.target}:
+                resolved_tool = tool
+                if tool == "auto":
+                    tool_names = pane_tools(pane, process_commands, children)
+                    if len(tool_names) != 1:
+                        raise MonitorError(
+                            "Could not infer a unique tool from the requested pane. "
+                            "Use --tool codex or --tool claude."
+                        )
+                    resolved_tool = next(iter(tool_names))
+                else:
+                    tool_names = pane_tools(pane, process_commands, children)
+                    if resolved_tool not in tool_names:
+                        raise MonitorError(
+                            f"Pane {requested_pane} is not running {resolved_tool}."
+                        )
+                return pane, resolved_tool
+        raise MonitorError(f"tmux pane {requested_pane} was not found.")
+
+    candidates: list[tuple[PaneInfo, str]] = []
+    for pane in panes:
+        if pane.pane_dead:
+            continue
+        tool_names = pane_tools(pane, process_commands, children)
+        if tool == "auto":
+            if len(tool_names) == 1:
+                candidates.append((pane, next(iter(tool_names))))
+        elif tool in tool_names:
+            candidates.append((pane, tool))
+
+    if not candidates:
+        target_name = tool if tool != "auto" else "codex or claude"
+        raise MonitorError(
+            f"No tmux pane running {target_name} was found. "
+            "Use --pane to target one explicitly."
+        )
+    if len(candidates) > 1:
+        options = ", ".join(f"{pane.target} ({resolved_tool})" for pane, resolved_tool in candidates)
+        raise MonitorError(f"Multiple candidate panes found: {options}. Use --pane or --tmux-session.")
+    return candidates[0]
+
+
+class TranscriptResolver:
+    def __init__(
+        self,
+        spec: ToolSpec,
+        root: Path,
+        *,
+        pane_cwd: str,
+        session_id: str | None,
+        explicit_path: Path | None,
+        log_path: Path,
+        debug: bool,
+        echo_logs: bool,
+    ) -> None:
+        self.spec = spec
+        self.root = root
+        self.pane_cwd = pane_cwd
+        self.session_id = session_id
+        self.explicit_path = explicit_path
+        self.log_path = log_path
+        self.debug = debug
+        self.echo_logs = echo_logs
+        self._cache: dict[str, TranscriptMeta] = {}
+        self._current_path: str | None = None
+
+    def resolve(self) -> Path | None:
+        if self.explicit_path:
+            if not self.explicit_path.exists():
+                raise MonitorError(f"Transcript file does not exist: {self.explicit_path}")
+            return self.explicit_path
+
+        if not self.root.exists():
+            return None
+
+        newest_overall: TranscriptMeta | None = None
+        newest_for_session: TranscriptMeta | None = None
+        newest_for_cwd: TranscriptMeta | None = None
+        transcript_count = 0
+
+        for path in self.root.rglob("*.jsonl"):
+            meta = self._metadata_for(path)
+            if meta is None:
+                continue
+            transcript_count += 1
+            if newest_overall is None or meta.mtime > newest_overall.mtime:
+                newest_overall = meta
+            if self.session_id and meta.session_id == self.session_id:
+                if newest_for_session is None or meta.mtime > newest_for_session.mtime:
+                    newest_for_session = meta
+            if meta.cwd == self.pane_cwd:
+                if newest_for_cwd is None or meta.mtime > newest_for_cwd.mtime:
+                    newest_for_cwd = meta
+
+        chosen = newest_for_session or newest_for_cwd
+        if chosen is None and transcript_count == 1:
+            chosen = newest_overall
+        if chosen is None:
+            return None
+
+        if chosen.path != self._current_path:
+            message = f"Monitoring transcript {chosen.path}"
+            if chosen.cwd and chosen.cwd != self.pane_cwd:
+                message += f" (fallback from cwd {self.pane_cwd})"
+            append_log(self.log_path, message, echo=self.echo_logs)
+            self._current_path = chosen.path
+        return Path(chosen.path)
+
+    def _metadata_for(self, path: Path) -> TranscriptMeta | None:
+        stat = path.stat()
+        cache_key = str(path)
+        cached = self._cache.get(cache_key)
+        if cached and cached.mtime == stat.st_mtime:
+            return cached
+
+        cwd: str | None = None
+        session_id: str | None = None
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for _ in range(12):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    extracted_cwd, extracted_session_id = self.spec.extract_metadata(record)
+                    cwd = cwd or extracted_cwd
+                    session_id = session_id or extracted_session_id
+                    if cwd or session_id:
+                        break
+        except OSError:
+            return None
+
+        meta = TranscriptMeta(
+            path=str(path),
+            cwd=cwd,
+            session_id=session_id,
+            mtime=stat.st_mtime,
+        )
+        self._cache[cache_key] = meta
+        if self.debug:
+            append_log(
+                self.log_path,
+                f"Indexed transcript {path} cwd={cwd!r} session_id={session_id!r}",
+                echo=self.echo_logs,
+            )
+        return meta
+
+
+class TranscriptTail:
+    def __init__(self, spec: ToolSpec, *, debug: bool, log_path: Path, echo_logs: bool) -> None:
+        self.spec = spec
+        self.debug = debug
+        self.log_path = log_path
+        self.echo_logs = echo_logs
+        self.path: Path | None = None
+        self.offset = 0
+
+    def bind(self, path: Path | None) -> None:
+        if path == self.path:
+            return
+        self.path = path
+        self.offset = 0
+
+    def read_activity(self) -> float | None:
+        if self.path is None or not self.path.exists():
+            return None
+
+        stat = self.path.stat()
+        if stat.st_size < self.offset:
+            self.offset = 0
+
+        last_activity: float | None = None
+        any_growth = False
+        with self.path.open(encoding="utf-8", errors="replace") as handle:
+            handle.seek(self.offset)
+            for line in handle:
+                any_growth = True
+                activity_timestamp = self._activity_timestamp(line)
+                if activity_timestamp is not None:
+                    last_activity = activity_timestamp
+            self.offset = handle.tell()
+
+        if last_activity is not None:
+            return last_activity
+        if any_growth:
+            return stat.st_mtime
+        return None
+
+    def _activity_timestamp(self, line: str) -> float | None:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if self.debug:
+                append_log(self.log_path, "Ignored invalid JSONL line while reading transcript.", echo=self.echo_logs)
+            return None
+
+        if not self.spec.is_activity(record):
+            return None
+
+        timestamp = parse_iso_timestamp(record.get("timestamp"))
+        return timestamp if timestamp is not None else time.time()
+
+
+def send_reminder(pane_id: str, reminder_text: str) -> None:
+    run_tmux(["send-keys", "-t", pane_id, "-l", reminder_text])
+    run_tmux(["send-keys", "-t", pane_id, "Enter"])
+
+
+def build_status(
+    config: MonitorConfig,
+    *,
+    pid: int,
+    transcript_path: Path | None,
+    last_active: float | None,
+    last_reminder: float | None,
+    state: str,
+) -> dict[str, Any]:
+    active = last_active is not None and (time.time() - last_active) <= config.active_window
+    next_reminder_at = None
+    if active and last_reminder is not None:
+        next_reminder_at = isoformat_utc(last_reminder + config.reminder_interval)
+    return {
+        "active": active,
+        "last_active_at": isoformat_utc(last_active),
+        "last_reminder_at": isoformat_utc(last_reminder),
+        "log_file": config.log_file,
+        "next_reminder_at": next_reminder_at,
+        "pane_cwd": config.pane_cwd,
+        "pane_id": config.pane_id,
+        "pane_target": config.pane_target,
+        "pid": pid,
+        "running": True,
+        "started_at": config.started_at,
+        "state": state,
+        "tool": config.tool,
+        "transcript_path": str(transcript_path) if transcript_path else None,
+    }
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.active_window <= 0:
+        raise MonitorError("--active-window must be positive.")
+    if args.interval < minimum_interval(args.active_window):
+        raise MonitorError(
+            "--interval must be greater than --active-window "
+            f"(minimum {minimum_interval(args.active_window)} seconds)."
+        )
+    if args.poll_interval <= 0:
+        raise MonitorError("--poll-interval must be positive.")
+    if args.scan_interval <= 0:
+        raise MonitorError("--scan-interval must be positive.")
+    if not args.reminder_text.strip():
+        raise MonitorError("--reminder-text must not be empty.")
+
+
+def create_config(args: argparse.Namespace) -> MonitorConfig:
+    validate_args(args)
+    pane, tool = resolve_pane(args.pane, args.tmux_session, args.tool)
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    reminder_text = " ".join(args.reminder_text.splitlines()).strip()
+    if not reminder_text:
+        raise MonitorError("--reminder-text must contain printable text after newline normalization.")
+    transcript_root = (
+        Path(args.transcript_root).expanduser().resolve()
+        if args.transcript_root
+        else TOOL_SPECS[tool].default_root.expanduser().resolve()
+    )
+    transcript_path = (
+        str(Path(args.transcript).expanduser().resolve()) if args.transcript else None
+    )
+    log_file = path_to_json(state_dir / "monitor.log")
+    return MonitorConfig(
+        tool=tool,
+        pane_id=pane.pane_id,
+        pane_target=pane.target,
+        pane_cwd=pane.current_path,
+        reminder_text=reminder_text,
+        reminder_interval=args.interval,
+        active_window=args.active_window,
+        poll_interval=args.poll_interval,
+        scan_interval=args.scan_interval,
+        transcript_root=path_to_json(transcript_root),
+        transcript_path=transcript_path,
+        session_id=args.session_id,
+        state_dir=path_to_json(state_dir),
+        log_file=log_file,
+        started_at=isoformat_utc(time.time()) or "",
+        debug=args.debug,
+    )
+
+
+def monitor_loop(config: MonitorConfig, *, foreground: bool) -> int:
+    state_dir = Path(config.state_dir)
+    pid_path = state_dir / "monitor.pid"
+    status_path = state_dir / "status.json"
+    config_path = state_dir / "config.json"
+    log_path = Path(config.log_file)
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    write_json(config_path, asdict(config))
+    pid_path.write_text(f"{os.getpid()}\n")
+
+    stop_requested = False
+
+    def request_stop(signum: int, frame: Any) -> None:
+        del signum, frame
+        nonlocal stop_requested
+        stop_requested = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    spec = TOOL_SPECS[config.tool]
+    resolver = TranscriptResolver(
+        spec,
+        Path(config.transcript_root),
+        pane_cwd=config.pane_cwd,
+        session_id=config.session_id,
+        explicit_path=Path(config.transcript_path) if config.transcript_path else None,
+        log_path=log_path,
+        debug=config.debug,
+        echo_logs=foreground,
+    )
+    tail = TranscriptTail(spec, debug=config.debug, log_path=log_path, echo_logs=foreground)
+
+    append_log(log_path, f"Monitor started for {config.tool} in pane {config.pane_target}.", echo=foreground)
+
+    last_active: float | None = None
+    last_reminder = time.time()
+    last_scan = 0.0
+    current_transcript: Path | None = None
+    last_state = "starting"
+
+    try:
+        while not stop_requested:
+            pane = find_pane_by_id(config.pane_id)
+            if pane is None or pane.pane_dead:
+                last_state = "pane-missing"
+                break
+
+            process_commands, children = load_process_tree()
+            if config.tool not in pane_tools(pane, process_commands, children):
+                last_state = "tool-exited"
+                break
+
+            now = time.time()
+            if current_transcript is None or (now - last_scan) >= config.scan_interval:
+                current_transcript = resolver.resolve()
+                tail.bind(current_transcript)
+                last_scan = now
+
+            observed_activity = tail.read_activity()
+            if observed_activity is not None:
+                last_active = observed_activity
+
+            active = last_active is not None and (now - last_active) <= config.active_window
+            if current_transcript is None:
+                last_state = "waiting-for-transcript"
+            elif not active:
+                last_state = "idle"
+            elif (now - last_reminder) < config.reminder_interval:
+                last_state = "cooldown"
+            else:
+                send_reminder(config.pane_id, config.reminder_text)
+                last_reminder = now
+                last_state = "reminder-sent"
+                append_log(log_path, f"Reminder injected into pane {config.pane_id}.", echo=foreground)
+
+            write_json(
+                status_path,
+                build_status(
+                    config,
+                    pid=os.getpid(),
+                    transcript_path=current_transcript,
+                    last_active=last_active,
+                    last_reminder=last_reminder,
+                    state=last_state,
+                ),
+            )
+            time.sleep(config.poll_interval)
+    finally:
+        write_json(
+            status_path,
+            {
+                "active": False,
+                "last_active_at": isoformat_utc(last_active),
+                "last_reminder_at": isoformat_utc(last_reminder),
+                "log_file": config.log_file,
+                "pane_cwd": config.pane_cwd,
+                "pane_id": config.pane_id,
+                "pane_target": config.pane_target,
+                "pid": os.getpid(),
+                "running": False,
+                "started_at": config.started_at,
+                "state": last_state,
+                "tool": config.tool,
+                "transcript_path": str(current_transcript) if current_transcript else None,
+            },
+        )
+        append_log(log_path, f"Monitor stopped with state {last_state}.", echo=foreground)
+        if pid_path.exists():
+            pid_path.unlink()
+
+    return 0
+
+
+def stop_monitor(state_dir: Path) -> int:
+    pid_path = state_dir / "monitor.pid"
+    pid = read_pid(pid_path)
+    if pid is None:
+        print("No running monitor found.")
+        return 0
+    if not process_is_running(pid):
+        if pid_path.exists():
+            pid_path.unlink()
+        print("Monitor pid file was stale and has been cleared.")
+        return 0
+
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if not process_is_running(pid):
+            print(f"Stopped monitor pid {pid}.")
+            return 0
+        time.sleep(0.1)
+    raise MonitorError(f"Monitor pid {pid} did not stop after SIGTERM.")
+
+
+def show_status(state_dir: Path, *, as_json: bool) -> int:
+    pid_path = state_dir / "monitor.pid"
+    status_path = state_dir / "status.json"
+    if not status_path.exists():
+        message = {"running": False, "state": "not-started"}
+        if as_json:
+            print(json.dumps(message, indent=2, sort_keys=True))
+        else:
+            print("Monitor is not running.")
+        return 0
+
+    status = read_json(status_path)
+    pid = read_pid(pid_path)
+    if pid is None:
+        status["running"] = False
+    elif not process_is_running(pid):
+        status["running"] = False
+        status.setdefault("state", "stale-pid")
+
+    if as_json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 0
+
+    print(f"running: {status.get('running', False)}")
+    for key in [
+        "state",
+        "tool",
+        "pane_target",
+        "pane_cwd",
+        "transcript_path",
+        "last_active_at",
+        "last_reminder_at",
+        "next_reminder_at",
+        "log_file",
+    ]:
+        if status.get(key) is not None:
+            print(f"{key}: {status[key]}")
+    return 0
+
+
+def launch_background_monitor(config: MonitorConfig) -> int:
+    state_dir = Path(config.state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = state_dir / "monitor.pid"
+    existing_pid = read_pid(pid_path)
+    if existing_pid is not None and process_is_running(existing_pid):
+        raise MonitorError(f"Monitor already running with pid {existing_pid}.")
+    if existing_pid is not None and pid_path.exists():
+        pid_path.unlink()
+
+    write_json(state_dir / "config.json", asdict(config))
+    subprocess_args = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "_monitor",
+        "--state-dir",
+        config.state_dir,
+    ]
+    process = subprocess.Popen(
+        subprocess_args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    time.sleep(0.2)
+    if process.poll() is not None:
+        log_path = Path(config.log_file)
+        log_tail = ""
+        if log_path.exists():
+            log_tail = "".join(log_path.read_text().splitlines(keepends=True)[-20:])
+        raise MonitorError(
+            "Background monitor exited immediately.\n"
+            + (log_tail if log_tail else "No log output was captured.")
+        )
+    print(f"Started monitor pid {process.pid} for {config.tool} in pane {config.pane_target}.")
+    print(f"Status file: {state_dir / 'status.json'}")
+    return 0
+
+
+def command_start(args: argparse.Namespace) -> int:
+    config = create_config(args)
+    return launch_background_monitor(config)
+
+
+def command_run(args: argparse.Namespace) -> int:
+    config = create_config(args)
+    return monitor_loop(config, foreground=True)
+
+
+def command_monitor(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    config = MonitorConfig(**read_json(state_dir / "config.json"))
+    return monitor_loop(config, foreground=False)
+
+
+def command_stop(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    return stop_monitor(state_dir)
+
+
+def command_status(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    return show_status(state_dir, as_json=args.json)
+
+
+def add_common_monitor_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--tool",
+        choices=["auto", "codex", "claude"],
+        default="auto",
+        help="Target tool. Use auto to infer it from the pane process tree.",
+    )
+    parser.add_argument(
+        "--pane",
+        help=(
+            "tmux pane target or pane id, for example codex:0.0 or %%3. If omitted, "
+            "auto-discovery expects exactly one matching pane."
+        ),
+    )
+    parser.add_argument("--tmux-session", help="Restrict auto-discovery to a single tmux session.")
+    parser.add_argument(
+        "--transcript-root",
+        help="Override the transcript root directory for the selected tool.",
+    )
+    parser.add_argument(
+        "--transcript",
+        help="Monitor one explicit transcript file instead of scanning the transcript root.",
+    )
+    parser.add_argument(
+        "--session-id",
+        help="Prefer transcripts matching this session id when multiple candidates exist.",
+    )
+    parser.add_argument(
+        "--reminder-text",
+        default=default_reminder_text(),
+        help="Text to inject into the pane. Newlines are normalised to spaces.",
+    )
+    parser.add_argument(
+        "--interval",
+        "--remind-every",
+        dest="interval",
+        type=int,
+        default=env_int("AI_REMINDER_INTERVAL", DEFAULT_REMINDER_INTERVAL),
+        help=(
+            "Seconds between reminders while active. Must be greater than "
+            f"--active-window; with the default active window ({DEFAULT_ACTIVE_WINDOW}) "
+            f"the minimum is {minimum_interval(DEFAULT_ACTIVE_WINDOW)}. Default: "
+            f"{DEFAULT_REMINDER_INTERVAL}."
+        ),
+    )
+    parser.add_argument(
+        "--active-window",
+        type=int,
+        default=env_int("AI_REMINDER_ACTIVE_WINDOW", DEFAULT_ACTIVE_WINDOW),
+        help=f"Seconds since last activity that still count as active work. Default: {DEFAULT_ACTIVE_WINDOW}.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=env_float("AI_REMINDER_POLL_INTERVAL", DEFAULT_POLL_INTERVAL),
+        help=f"Seconds between monitor loop iterations. Default: {DEFAULT_POLL_INTERVAL}.",
+    )
+    parser.add_argument(
+        "--scan-interval",
+        type=float,
+        default=env_float("AI_REMINDER_SCAN_INTERVAL", DEFAULT_SCAN_INTERVAL),
+        help=f"Seconds between transcript re-resolution scans. Default: {DEFAULT_SCAN_INTERVAL}.",
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=str(default_state_dir()),
+        help=f"Directory used for the pid, status, config, and log files. Default: {default_state_dir()}.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Log transcript indexing details.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=APP_NAME,
+        usage=f"{APP_NAME} [-h] <command> [options]",
+        description=top_level_description(),
+        epilog=top_level_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True, title="commands", metavar="command")
+
+    start_parser = subparsers.add_parser(
+        "start",
+        prog=f"{APP_NAME} start",
+        help="Start the monitor in the background.",
+        description="Start ai-reminder in the background.",
+        epilog=monitor_command_epilog("start"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_monitor_args(start_parser)
+    start_parser.set_defaults(func=command_start)
+
+    run_parser = subparsers.add_parser(
+        "run",
+        prog=f"{APP_NAME} run",
+        help="Run the monitor in the foreground.",
+        description="Run ai-reminder in the foreground.",
+        epilog=monitor_command_epilog("run"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_monitor_args(run_parser)
+    run_parser.set_defaults(func=command_run)
+
+    stop_parser = subparsers.add_parser(
+        "stop",
+        prog=f"{APP_NAME} stop",
+        help="Stop the running monitor.",
+        description="Stop a running ai-reminder monitor.",
+        epilog=state_command_epilog("stop"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    stop_parser.add_argument(
+        "--state-dir",
+        default=str(default_state_dir()),
+        help=f"Directory containing the monitor pid and status files. Default: {default_state_dir()}.",
+    )
+    stop_parser.set_defaults(func=command_stop)
+
+    status_parser = subparsers.add_parser(
+        "status",
+        prog=f"{APP_NAME} status",
+        help="Show monitor status.",
+        description="Show ai-reminder monitor status.",
+        epilog=state_command_epilog("status"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    status_parser.add_argument(
+        "--state-dir",
+        default=str(default_state_dir()),
+        help=f"Directory containing the monitor pid and status files. Default: {default_state_dir()}.",
+    )
+    status_parser.add_argument("--json", action="store_true", help="Emit JSON status.")
+    status_parser.set_defaults(func=command_status)
+
+    monitor_parser = subparsers.add_parser(
+        "_monitor",
+        prog=f"{APP_NAME} _monitor",
+        help=argparse.SUPPRESS,
+    )
+    monitor_parser.add_argument("--state-dir", required=True)
+    monitor_parser.set_defaults(func=command_monitor)
+    subparsers._choices_actions = [
+        action for action in subparsers._choices_actions if getattr(action, "dest", None) != "_monitor"
+    ]
+
+    return parser
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except MonitorError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

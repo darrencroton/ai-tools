@@ -1,8 +1,8 @@
 # Repository scope
 # Keep the repo focused on your hand-written shared config and skills.
-skills/ai-orchestrator/
 skills/pdf/
 skills/.system/
+archive/
 
 # macOS / editor noise
 .DS_Store

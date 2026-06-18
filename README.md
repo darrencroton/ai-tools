@@ -21,7 +21,7 @@ Use explicit skill calls. Do not rely on the model to guess which workflow appli
 
 ### 1. Plan First
 
-Call `implementation-plan` when you want the planning chat.
+Call [`implementation-plan`](skills/implementation-plan/) when you want the planning chat.
 
 The plan should define one or more small slices. Each slice needs:
 
@@ -38,7 +38,7 @@ If a slice touches a risky surface, split it smaller or require explicit approva
 
 ### 2. Implement In A New Chat
 
-Call `scoped-implementation` and paste the exact slice receipt from the plan.
+Call [`scoped-implementation`](skills/scoped-implementation/) and paste the exact slice receipt from the plan.
 
 The implementing agent should:
 
@@ -47,7 +47,7 @@ The implementing agent should:
 - change only the approved files/functions
 - avoid opportunistic cleanup
 - run the planned validation
-- prepare the frozen contract, diff summary, changed files, and validation results for `drift-audit`
+- prepare the frozen contract, diff summary, changed files, and validation results for [`drift-audit`](skills/drift-audit/)
 
 The required receipt is:
 
@@ -63,7 +63,7 @@ The required receipt is:
 
 ### 3. Use The Orchestrator When It Helps
 
-Call [`ai-orchestrator`](https://github.com/darrencroton/ai-orchestrator) when the work benefits from delegation, independent review, long-running checks, or another model's perspective.
+Call [`ai-orchestrator`](skills/ai-orchestrator/) when the work benefits from delegation, independent review, long-running checks, or another model's perspective.
 
 The orchestrator is responsible for the workflow, not for delegating everything. It should keep small slices local when delegation adds overhead. It should delegate when doing so improves quality, speed, independence, or context management.
 
@@ -82,7 +82,7 @@ The orchestrator must name required skills in worker prompts. Delegates should n
 
 The first review question is not "is this good code?" It is "was this authorized?"
 
-Call [`drift-audit`](skills/drift-audit/) after implementation and before `code-review`.
+Call [`drift-audit`](skills/drift-audit/) after implementation and before [`code-review`](skills/code-review/).
 
 Use the authorization gate to compare:
 
@@ -94,27 +94,27 @@ Use the authorization gate to compare:
 - non-goals preserved
 - new coupling
 
-Only after `drift-audit` passes should normal code review start.
+Only after [`drift-audit`](skills/drift-audit/) passes should normal code review start.
 
 For higher-risk work, have the orchestrator run a hostile drift audit with a second agent. Give that worker only the frozen contract, the diff, and relevant tests. Its job is to find extra behaviour, removed edge cases, hidden rewrites, missing tests, and new coupling.
 
 ### 5. Review Quality
 
-Call `code-review` after `drift-audit` passes, or for standalone reviews.
+Call [`code-review`](skills/code-review/) after [`drift-audit`](skills/drift-audit/) passes, or for standalone reviews.
 
-When a frozen contract exists, `code-review` should consume the `drift-audit` result, then review correctness, edge cases, tests, error handling, maintainability, and any domain-specific risks.
+When a frozen contract exists, [`code-review`](skills/code-review/) should consume the [`drift-audit`](skills/drift-audit/) result, then review correctness, edge cases, tests, error handling, maintainability, and any domain-specific risks.
 
 Passing tests are useful evidence, not proof. A missing test is a real finding when the change is risky enough that a regression could ship unnoticed.
 
 ### 6. Simplify Separately
 
-Call `code-simplifier` only when you explicitly want a simplification/refactor pass over working code.
+Call [`code-simplifier`](skills/code-simplifier/) only when you explicitly want a simplification/refactor pass over working code.
 
 This is not part of the default implementation workflow. Use it when behaviour already works and you want a leaner, smarter, more maintainable way to do the same thing. The simplifier can be ambitious, but it must preserve public contracts, accepted edge cases, data shapes, and product behaviour.
 
 ### 7. Preserve State
 
-Call `handoff` when continuing in another chat or agent.
+Call [`handoff`](skills/handoff/) when continuing in another chat or agent.
 
 A useful handoff should include:
 
@@ -129,7 +129,7 @@ A useful handoff should include:
 
 ### 8. Commit Only After Approval
 
-Call `commit` only after explicit user approval.
+Call [`commit`](skills/commit/) only after explicit user approval.
 
 The commit should stage specific files by name, never bypass hooks, never amend, and include a meaningful message that lists changed files with reasons.
 
@@ -137,13 +137,13 @@ The commit should stage specific files by name, never bypass hooks, never amend,
 
 For normal feature or bug work:
 
-1. `implementation-plan` in the planning chat.
-2. New chat with `scoped-implementation` for one slice.
-3. Use `ai-orchestrator` only if delegation or independent audit is worth it.
-4. Run `drift-audit`.
-5. Run `code-review`.
-6. Use `handoff` if the work continues elsewhere.
-7. Use `commit` only when approved.
+1. [`implementation-plan`](skills/implementation-plan/) in the planning chat.
+2. New chat with [`scoped-implementation`](skills/scoped-implementation/) for one slice.
+3. Use [`ai-orchestrator`](skills/ai-orchestrator/) only if delegation or independent audit is worth it.
+4. Run [`drift-audit`](skills/drift-audit/).
+5. Run [`code-review`](skills/code-review/).
+6. Use [`handoff`](skills/handoff/) if the work continues elsewhere.
+7. Use [`commit`](skills/commit/) only when approved.
 
 Keep the loop boring, narrow, and auditable. The agent can move fast inside the lane, but it does not get to redraw the lane while working.
 
