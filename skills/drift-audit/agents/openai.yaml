@@ -1,0 +1,4 @@
+interface:
+  display_name: "Drift Audit"
+  short_description: "Audit scope drift before code review"
+  default_prompt: "Use drift-audit to compare an implementation diff against a frozen contract and report authorization drift before quality review."

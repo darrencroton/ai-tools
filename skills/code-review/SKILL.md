@@ -18,7 +18,7 @@ Produce a senior-level review that is evidence-based, risk-driven, and difficult
 From the user message and local context, identify:
 
 - **Review target**: diff, commit, branch, files, directory, or completed task
-- **Requirement source**: frozen contract, plan, spec, ticket, issue, paper, docs, or explicit user criteria
+- **Requirement source**: drift-audit result, plan, spec, ticket, issue, paper, docs, or explicit user criteria
 - **Project rules**: `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING`, test/build conventions
 - **Evidence available**: git diff, tests, benchmarks, logs, docs, configs, generated outputs
 
@@ -44,11 +44,10 @@ Every review must do all of the following:
 - If there is no usable git context, review the supplied files directly and say so.
 - Identify high-risk files first: core algorithms, public APIs, memory management, concurrency, I/O, configs, tests, and build files.
 
-### 2. Run authorization gate when a frozen contract exists
-- Compare actual changed files/functions/components against the authorized surface before judging code quality.
-- Identify behaviour added, behaviour removed, test changes, and new coupling.
-- Treat unapproved scope drift as a finding. Severity depends on impact: use `P0` for definite safety/data/security/contract breakage, `P1` for material unapproved behaviour or risky surface expansion, and `P2` for lower-risk authorization gaps.
-- Do not excuse drift because the resulting code is locally reasonable.
+### 2. Confirm authorization status
+- If a `drift-audit` result is supplied, summarize its verdict and proceed to quality review.
+- If a frozen contract exists but no `drift-audit` result is supplied, state that the user should explicitly call `drift-audit` first. Continue only if the user explicitly asks for combined drift and quality review.
+- If a supplied `drift-audit` result is incomplete or contradicted by the diff, report that as an open question instead of silently redoing the audit.
 
 ### 3. Establish expected behaviour
 - Extract acceptance criteria from the plan/spec/ticket when present.
@@ -73,7 +72,7 @@ Every review must do all of the following:
 ### 7. Validate review depth
 Before finishing, ask:
 
-- Did I compare the actual change set with the frozen contract if one exists?
+- Did I check or request the `drift-audit` result when a frozen contract exists?
 - Did I inspect all changed files?
 - Did I inspect the relevant tests?
 - Did I follow risky interfaces beyond the diff?
@@ -106,14 +105,12 @@ Good finding: specific, reproducible, and tied to real engineering risk.
 
 ## Required Output
 
-When a frozen contract exists, start with `Authorization Gate`, then list findings ordered by severity. When no frozen contract exists, start with findings as usual.
+When a `drift-audit` result exists, start with `Authorization Status`, then list quality findings ordered by severity. When no frozen contract exists, start with findings as usual.
 
 ```md
-## Authorization Gate
-- Intended slice:
-- Authorized surface:
-- Actual changed surface:
-- Drift verdict: PASS / FAIL / PASS WITH RISKS
+## Authorization Status
+- Drift audit verdict:
+- Notes:
 
 ## Findings
 

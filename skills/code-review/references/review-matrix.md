@@ -4,7 +4,7 @@ Use this as a required checklist. Every review should explicitly consider each d
 
 | Dimension | What to check | High-risk signals |
 | --- | --- | --- |
-| Requirements, authorization, and design fit | Does the change satisfy the stated task, stay inside the frozen contract when one exists, preserve intended behaviour, and avoid unapproved scope creep? | Missing acceptance criteria, actual changed files outside the authorized surface, silent behaviour changes, incomplete migrations, incompatible interfaces |
+| Requirements and design fit | Does the change satisfy the stated task, preserve intended behaviour, and fit the intended design after any drift-audit gate has passed? | Missing acceptance criteria, silent behaviour changes, incomplete migrations, incompatible interfaces, unresolved drift-audit failure |
 | Functional correctness | Are the algorithms and control flow correct on the happy path and plausible failure paths? | Off-by-one logic, wrong branch conditions, stale state, incorrect units, missing updates to dependent code |
 | Boundary conditions and invalid input | What happens with empty, null, NaN, Inf, overflow, underflow, large inputs, degenerate geometry, or malformed files? | Assumed non-empty arrays, unchecked casts, unguarded indexing, divide-by-zero, sentinel misuse |
 | State, lifetime, and resources | Are ownership, cleanup, object lifetime, file handles, buffers, and external resources managed correctly? | Leaks, double free, dangling pointers/references/views, partially initialized state, missing cleanup on error paths |

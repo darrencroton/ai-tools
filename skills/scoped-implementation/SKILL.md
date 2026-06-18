@@ -1,6 +1,6 @@
 ---
 name: scoped-implementation
-description: Implement one frozen acceptance slice and audit actual changes against the authorized surface. Use only when the user explicitly asks for this skill or provides an implementation-plan slice to execute.
+description: Implement one frozen acceptance slice from an implementation-plan without expanding scope. Use only when the user explicitly asks for this skill or provides an implementation-plan slice to execute. After this skill, the user should explicitly call drift-audit for authorization review.
 ---
 
 # Scoped Implementation
@@ -28,9 +28,8 @@ If the contract is missing or too vague, stop after drafting a candidate contrac
 2. **Check starting state** - inspect `git status` and relevant files. Do not overwrite unrelated user changes.
 3. **Implement only the slice** - keep edits inside the authorized files/functions. Do not perform opportunistic cleanup.
 4. **Validate** - run the targeted checks from the contract. Add or update tests when the contract requires it.
-5. **Authorization gate** - compare actual changes with the frozen contract before judging code quality.
-6. **Quality gate** - review the implementation for correctness, tests, maintainability, and regressions.
-7. **Report receipt** - finish with the implementation receipt below.
+5. **Prepare drift audit input** - collect the frozen contract, changed files, diff summary, and validation results for the user's next explicit `drift-audit` call.
+6. **Report receipt** - finish with the implementation receipt below. Do not run `drift-audit` from this skill unless the user explicitly calls both skills in the same request.
 
 ## Delegation
 
@@ -38,26 +37,11 @@ Keep small implementation slices local when delegation would add more prompt/con
 
 Use `ai-orchestrator` only when it is also explicitly requested or already active for the task. When using it:
 
-- delegate codebase mapping, long-running tests, implementation of a well-bounded slice, or hostile drift audit when that improves quality or saves meaningful time
+- delegate codebase mapping, long-running tests, or implementation of a well-bounded slice when that improves quality or saves meaningful time
+- delegate `drift-audit` only when the user explicitly called `drift-audit` or explicitly asked to combine implementation and drift audit
 - never let a worker expand the slice, approve drift, or own the final verdict
 - give edit workers the frozen contract and exact authorized surface
-- give audit workers only the frozen contract, diff, and relevant tests
-
-## Authorization Gate
-
-Before normal code review, answer:
-
-- Intended slice:
-- Allowed files/functions:
-- Actual files/functions changed:
-- Behaviour added:
-- Behaviour removed:
-- Tests added/updated:
-- Explicit non-goals preserved:
-- Drift found:
-- Drift disposition: none / fixed / needs user approval
-
-If drift exists, resolve it before the quality gate unless the user explicitly approves the expanded scope.
+- give `drift-audit` workers only the frozen contract, diff, and relevant tests
 
 ## Implementation Receipt
 
@@ -75,25 +59,19 @@ End with this shape:
 ### Actual Changed Surface
 - ...
 
-### Behaviour Added
-- ...
-
-### Behaviour Removed
-- ...
-
 ### Tests Added / Updated
 - ...
 
 ### Validation Run
 - ...
 
-### Authorization Gate
-- PASS / FAIL / PASS WITH APPROVED DRIFT
-- Notes:
+### Drift Audit Input
+- Frozen contract:
+- Diff / changed files:
+- Relevant tests:
 
-### Quality Gate
-- PASS / FAIL / PASS WITH RISKS
-- Notes:
+### Recommended Next Step
+- Explicitly call `drift-audit` before `code-review`.
 
 ### Rollback Path
 - ...
