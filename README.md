@@ -32,7 +32,7 @@ The plan should define one or more small slices. Each slice needs:
 - explicit non-goals
 - risky surfaces, such as auth, billing, schema, shared types, routing, API contracts, global state, or deployment config
 - rollback path
-- a copyable next-chat prompt
+- a copyable next-chat prompt (see [Running A Plan: Two Modes](#running-a-plan-two-modes))
 
 If a slice touches a risky surface, split it smaller or require explicit approval.
 
@@ -146,6 +146,66 @@ For normal feature or bug work:
 7. Use [`commit`](skills/commit/) only when approved.
 
 Keep the loop boring, narrow, and auditable. The agent can move fast inside the lane, but it does not get to redraw the lane while working.
+
+### Running A Plan: Two Modes
+
+The plan is created in one chat; implementation happens when you return and paste the plan's `Next Chat Prompt` into a fresh session. There are two ways to run that session. The skill chain is identical in both (`scoped-implementation` → `drift-audit` → `code-review` → `commit`, with `ai-orchestrator` for delegation and `handoff` at boundaries). They differ only in who holds the gates and when handoff happens.
+
+Both modes keep two non-negotiables: a slice whose Risk Flags mark approval-needed pauses (Mode A) or stops the run (Mode B), and each slice reports its authorization-gate result before quality review.
+
+**Mode A — Assisted run.** Use when slices are risky, touch flagged surfaces, or you want a checkpoint between them. You stay in the loop, approve before risky slices, review findings, and approve each commit. One slice (or a few tightly-coupled slices) per chat, then a handoff to the next session. Set the plan file path and which slice(s) this session covers:
+
+```md
+Plan file: <path>
+Slices this session: <e.g. Slice 2 — or Slices 2–3 only if tightly coupled>
+
+Read the full plan file first. If a selected slice receipt is incomplete or the plan state is unclear, stop and tell me before coding.
+
+Work on the current feature branch for this plan; if none exists, create one and tell me the name.
+
+Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily hostile drift-audit, independent code-review, and long-running tests.
+
+For each selected slice, in plan order:
+1. Restate the frozen contract (authorized surface + non-goals) from the plan.
+2. If the slice's Risk Flags mark approval-needed, stop and get my approval before coding.
+3. Apply scoped-implementation against the slice contract.
+4. Apply drift-audit. Report the authorization gate result before any quality review.
+5. If the gate passes, apply code-review. If it fails, fix the drift and re-audit.
+6. Surface drift and review findings to me, fix them, then re-run the relevant gate.
+7. Ask me before committing. On my approval, commit that slice with the commit skill.
+
+After the selected slice(s) are committed, use handoff to record state and the next slice to resume from. Do not continue past the selected slice(s).
+
+Confirm before starting: plan file read, selected slice(s), branch, and the first slice.
+```
+
+**Mode B — Autonomous full-loop driver.** Use when the plan is well-isolated and you want to step away. The orchestrator runs all remaining slices, delegates hostile drift-audit and independent review per slice, recovers from findings itself, and commits each slice that clears all gates. With a fresh branch per run and a commit per gated slice, the only real downside is wasted time. You assess at the end:
+
+```md
+Plan file: <path>
+Scope: all remaining slices, in plan order.
+
+Read the full plan file first. If the plan is incomplete or its state is unclear, stop and report instead of improvising.
+
+Act as the orchestrator per the ai-orchestrator skill. You own the full run — implement, gate, recover, and make the accept/reject call. Delegate to other models for independence and context economy per that skill: at minimum a hostile drift-audit and an independent code-review per slice, plus long-running tests.
+
+Setup: create a new branch for this run, switch to it, and report the name.
+
+For each slice, in plan order:
+1. Restate the frozen contract (authorized surface + non-goals).
+2. If the slice's Risk Flags mark approval-needed, STOP the run and report — do not self-approve a slice the plan gated for a human.
+3. Apply scoped-implementation against the slice contract.
+4. Apply drift-audit (delegate a hostile audit). Record the authorization gate result.
+5. If the gate fails, fix the drift inside the contract and re-audit. If it can't be fixed inside the contract, STOP and report.
+6. On a passing gate, apply code-review (delegate for independence). Fix findings, then re-run the relevant gate.
+7. When the slice passes validation, drift-audit, and code-review, commit it with the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
+
+Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, write a handoff with current state and the next slice to resume.
+
+When all slices are complete, write a final handoff/summary: slices committed, gate results per slice, and anything left for me to assess.
+
+Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
+```
 
 ## Notes
 
