@@ -202,7 +202,7 @@ For each slice, in plan order:
 
 Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, write a handoff with current state and the next slice to resume.
 
-When all slices are complete, write a final handoff/summary: slices committed, gate results per slice, and anything left for me to assess.
+When all slices are complete, write a final summary: slices committed, gate results per slice, and anything left for me to assess.
 
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
