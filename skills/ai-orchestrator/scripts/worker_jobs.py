@@ -1574,7 +1574,7 @@ def build_parser() -> argparse.ArgumentParser:
     activity_parser = subparsers.add_parser("activity", help="Show lightweight worker activity signals.")
     activity_parser.add_argument("--run-dir", required=True)
     activity_parser.add_argument("--label")
-    activity_parser.add_argument("--max-idle", type=int, default=300)
+    activity_parser.add_argument("--max-idle", type=int, default=900)
     activity_parser.add_argument("--json", action="store_true")
     activity_parser.set_defaults(func=command_activity)
 
