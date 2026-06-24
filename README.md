@@ -171,7 +171,7 @@ For each selected slice, in plan order:
 3. Apply scoped-implementation against the slice contract.
 4. Apply drift-audit. Report the authorization gate result before any quality review.
 5. If the gate passes, apply code-review. If it fails, fix the drift and re-audit.
-6. Surface drift and review findings to me, fix them, then re-run the relevant gate.
+6. Surface findings to me; fix all of them each pass, including P2/P3. If a second consecutive round returns only P2/P3 findings with no substantive new issues compared to the prior round, the review has converged — record residuals in the slice summary and proceed.
 7. Ask me before committing. On my approval, commit that slice with the commit skill.
 
 After the selected slice(s) are committed, use handoff to record state and the next slice to resume from. Do not continue past the selected slice(s).
@@ -197,7 +197,7 @@ For each slice, in plan order:
 3. Apply scoped-implementation against the slice contract.
 4. Apply drift-audit (delegate a hostile audit). Record the authorization gate result.
 5. If the gate fails, fix the drift inside the contract and re-audit. If it can't be fixed inside the contract, STOP and report.
-6. On a passing gate, apply code-review (delegate for independence). Fix findings, then re-run the relevant gate.
+6. On a passing gate, apply code-review (delegate for independence). Fix all findings each pass, including P2/P3. If a second consecutive round returns only P2/P3 findings with no substantive new issues compared to the prior round, the review has converged — record residuals in the slice summary and continue.
 7. When the slice passes validation, drift-audit, and code-review, commit it with the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
 
 Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, write a handoff with current state and the next slice to resume.
