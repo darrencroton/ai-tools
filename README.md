@@ -4,7 +4,7 @@ A collection of skills for AI-assisted software development that stays narrow, a
 
 ## What you can do with this
 
-Use these skills when you want AI to help you ship features and fix bugs without losing track of what changed and why.
+Use these skills when you want AI to help you implement features and fix bugs without losing track of what changed and why.
 
 **Stay in the loop as work progresses.** Plan the work upfront, then run one slice at a time with checkpoints between them. The agent pauses before risky changes, surfaces drift and review findings, and asks for your approval before committing. Good when the work touches sensitive surfaces or you want a clear record of each decision.
 
@@ -24,8 +24,6 @@ Both paths use the same skill chain. They differ only in who holds the gates and
 | [`code-simplifier`](skills/code-simplifier/) | Refines working code for clarity and maintainability without changing behaviour. A separate cleanup pass — not part of the default implementation flow. |
 | [`handoff`](skills/handoff/) | Writes a compact handoff file when continuing in another chat. Captures current status, what's left, blockers, and the single best next action. |
 | [`commit`](skills/commit/) | Stages and commits specific files by name, never skips hooks, and writes a message that lists changed files with reasons. Only called after explicit approval. |
-| [`report`](skills/report/) | Produces structured engineering reports — investigations, bug hunts, comparisons, status updates, or final summaries — with consistent scope, evidence, findings, and next actions. |
-| [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
 
 ## Workflow
 
@@ -100,6 +98,13 @@ When all slices are complete, write a final summary: slices committed, gate resu
 
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
+
+## Additional Skills
+
+| Skill | What it does |
+|-------|-------------|
+| [`report`](skills/report/) | Produces structured engineering reports — investigations, bug hunts, comparisons, status updates, or final summaries — with consistent scope, evidence, findings, and next actions. |
+| [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
 
 ## Setup
 
