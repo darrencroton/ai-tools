@@ -1,159 +1,51 @@
 # AI Tools
 
-Shared AI agent configuration files and hand-written skills.
+A collection of skills for AI-assisted software development that stays narrow, auditable, and under your control. Each run implements one small slice, proves it stayed inside the agreed boundaries, and asks before committing. The agent moves fast inside the lane — it just doesn't get to redraw it.
 
-## Contents
+## What you can do with this
 
-- `AGENTS.md`: global instructions used across AI coding assistants
-- `setup.sh`: setup script for linking shared AI coding configuration files into local tool directories
-- `tools.conf`: tool registration used by the setup script
-- `skills/`: reusable skills for AI coding
+Use these skills when you want AI to help you implement features and fix bugs without losing track of what changed and why.
 
-## Agentic Coding Workflow
+**Stay in the loop as work progresses.** Plan the work upfront, then run one slice at a time with checkpoints between them. The agent pauses before risky changes, surfaces drift and review findings, and asks for your approval before committing. Good when the work touches sensitive surfaces or you want a clear record of each decision.
 
-The point of this workflow is not to make agents slower or more ceremonial. The point is to make each run narrow enough that speed is useful and the result can be audited.
+**Hand it over and come back when it's done.** Give the agent a complete plan and let it run all remaining slices on its own — implementing, auditing scope, reviewing quality, and committing each slice that passes all gates. It stops if it hits a slice you've flagged for human approval or a problem it can't resolve within the agreed contract. Good when the plan is well-isolated and the cost of an error is low.
 
-### Core Rule
+Both paths use the same skill chain. They differ only in who holds the gates and when handoff happens.
 
-An agent loop should not mean "keep expanding the feature until it feels done." It should mean: freeze one acceptance slice, implement only that slice, prove the work stayed inside the lane, then review quality.
+## Skills
+
+| Skill | What it does |
+|-------|-------------|
+| [`implementation-plan`](skills/implementation-plan/) | Breaks a request into narrow, ordered slices. Each slice gets acceptance criteria, an authorized surface, tests to run, risky surfaces flagged, and a copyable prompt for the next chat. |
+| [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope. Restates the authorized surface before coding, stays inside approved files, and prepares a receipt for drift audit. |
+| [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Compares actual changes against the frozen contract — before any quality review. |
+| [`code-review`](skills/code-review/) | Performs a senior-level review after drift audit passes. Covers correctness, edge cases, tests, error handling, maintainability, and domain-specific risks. |
+| [`ai-orchestrator`](skills/ai-orchestrator/) | Manages delegation to external AI tools (Claude Code, Codex, Copilot) when independence, parallel work, or context economy helps. Owns planning, verification, and final responsibility — workers produce inputs, the orchestrator decides. |
+| [`code-simplifier`](skills/code-simplifier/) | Refines working code for clarity and maintainability without changing behaviour. A separate cleanup pass — not part of the default implementation flow. |
+| [`handoff`](skills/handoff/) | Writes a compact handoff file when continuing in another chat. Captures current status, what's left, blockers, and the single best next action. |
+| [`commit`](skills/commit/) | Stages and commits specific files by name, never skips hooks, and writes a message that lists changed files with reasons. Only called after explicit approval. |
+
+## Workflow
+
+The default flow for feature or bug work:
+
+1. **Plan** — call `implementation-plan`. Define slices, freeze contracts, flag risky surfaces.
+2. **Implement** — new chat, call `scoped-implementation` with the slice receipt. One slice per chat.
+3. **Audit scope** — call `drift-audit`. Was what happened authorized?
+4. **Review quality** — call `code-review` after drift audit passes.
+5. **Simplify** (optional) — call `code-simplifier` if you want a cleanup pass over working code.
+6. **Hand off** (if needed) — call `handoff` before ending a session that isn't finished.
+7. **Commit** — call `commit` only after you approve.
+
+Use `ai-orchestrator` when delegation improves quality, speed, or context management — for codebase mapping, plan critique, hostile drift audit, independent review, or long-running tests.
 
 Use explicit skill calls. Do not rely on the model to guess which workflow applies.
 
-### 1. Plan First
+### Running A Plan
 
-Call [`implementation-plan`](skills/implementation-plan/) when you want the planning chat.
+The plan outputs a `Next Chat Prompt`. Paste it into a fresh session. Choose which version fits your situation:
 
-The plan should define one or more small slices. Each slice needs:
-
-- intended change
-- acceptance criteria
-- authorized files/functions/components
-- tests to add, update, or run
-- explicit non-goals
-- risky surfaces, such as auth, billing, schema, shared types, routing, API contracts, global state, or deployment config
-- rollback path
-- a copyable next-chat prompt (see [Running A Plan: Two Modes](#running-a-plan-two-modes))
-
-If a slice touches a risky surface, split it smaller or require explicit approval.
-
-### 2. Implement In A New Chat
-
-Call [`scoped-implementation`](skills/scoped-implementation/) and paste the exact slice receipt from the plan.
-
-The implementing agent should:
-
-- restate the authorized surface before coding
-- inspect current git state
-- change only the approved files/functions
-- avoid opportunistic cleanup
-- run the planned validation
-- prepare the frozen contract, diff summary, changed files, and validation results for [`drift-audit`](skills/drift-audit/)
-
-The required receipt is:
-
-- intended slice
-- authorized surface
-- actual changed surface
-- behaviour added
-- behaviour removed
-- tests added or updated
-- validation run
-- drift audit input
-- rollback path
-
-### 3. Use The Orchestrator When It Helps
-
-Call [`ai-orchestrator`](skills/ai-orchestrator/) when the work benefits from delegation, independent review, long-running checks, or another model's perspective.
-
-The orchestrator is responsible for the workflow, not for delegating everything. It should keep small slices local when delegation adds overhead. It should delegate when doing so improves quality, speed, independence, or context management.
-
-Good delegation targets:
-
-- codebase mapping before a plan
-- plan critique
-- implementing a well-bounded slice
-- long-running tests
-- hostile drift audit
-- standalone quality review
-
-The orchestrator must name required skills in worker prompts. Delegates should not infer skills from context. If a required skill is unavailable to a worker, the worker should report that and follow the explicit prompt contract.
-
-### 4. Audit Drift Before Quality
-
-The first review question is not "is this good code?" It is "was this authorized?"
-
-Call [`drift-audit`](skills/drift-audit/) after implementation and before [`code-review`](skills/code-review/).
-
-Use the authorization gate to compare:
-
-- intended slice vs actual changes
-- allowed files/functions vs changed files/functions
-- expected tests vs actual tests
-- behaviour added
-- behaviour removed
-- non-goals preserved
-- new coupling
-
-Only after [`drift-audit`](skills/drift-audit/) passes should normal code review start.
-
-For higher-risk work, have the orchestrator run a hostile drift audit with a second agent. Give that worker only the frozen contract, the diff, and relevant tests. Its job is to find extra behaviour, removed edge cases, hidden rewrites, missing tests, and new coupling.
-
-### 5. Review Quality
-
-Call [`code-review`](skills/code-review/) after [`drift-audit`](skills/drift-audit/) passes, or for standalone reviews.
-
-When a frozen contract exists, [`code-review`](skills/code-review/) should consume the [`drift-audit`](skills/drift-audit/) result, then review correctness, edge cases, tests, error handling, maintainability, and any domain-specific risks.
-
-Passing tests are useful evidence, not proof. A missing test is a real finding when the change is risky enough that a regression could ship unnoticed.
-
-### 6. Simplify Separately
-
-Call [`code-simplifier`](skills/code-simplifier/) only when you explicitly want a simplification/refactor pass over working code.
-
-This is not part of the default implementation workflow. Use it when behaviour already works and you want a leaner, smarter, more maintainable way to do the same thing. The simplifier can be ambitious, but it must preserve public contracts, accepted edge cases, data shapes, and product behaviour.
-
-### 7. Preserve State
-
-Call [`handoff`](skills/handoff/) when continuing in another chat or agent.
-
-A useful handoff should include:
-
-- objective
-- task list
-- current status
-- frozen contract, if one exists
-- files that matter
-- validation run and still needed
-- authorization gate status
-- next action
-
-### 8. Commit Only After Approval
-
-Call [`commit`](skills/commit/) only after explicit user approval.
-
-The commit should stage specific files by name, never bypass hooks, never amend, and include a meaningful message that lists changed files with reasons.
-
-### Practical Default
-
-For normal feature or bug work:
-
-1. [`implementation-plan`](skills/implementation-plan/) in the planning chat.
-2. New chat with [`scoped-implementation`](skills/scoped-implementation/) for one slice.
-3. Use [`ai-orchestrator`](skills/ai-orchestrator/) only if delegation or independent audit is worth it.
-4. Run [`drift-audit`](skills/drift-audit/).
-5. Run [`code-review`](skills/code-review/).
-6. Use [`handoff`](skills/handoff/) if the work continues elsewhere.
-7. Use [`commit`](skills/commit/) only when approved.
-
-Keep the loop boring, narrow, and auditable. The agent can move fast inside the lane, but it does not get to redraw the lane while working.
-
-### Running A Plan: Two Modes
-
-The plan is created in one chat; implementation happens when you return and paste the plan's `Next Chat Prompt` into a fresh session. There are two ways to run that session. The skill chain is identical in both (`scoped-implementation` → `drift-audit` → `code-review` → `commit`, with `ai-orchestrator` for delegation and `handoff` at boundaries). They differ only in who holds the gates and when handoff happens.
-
-Both modes keep two non-negotiables: a slice whose Risk Flags mark approval-needed pauses (Mode A) or stops the run (Mode B), and each slice reports its authorization-gate result before quality review.
-
-**Mode A — Assisted run.** Use when slices are risky, touch flagged surfaces, or you want a checkpoint between them. You stay in the loop, approve before risky slices, review findings, and approve each commit. One slice (or a few tightly-coupled slices) per chat, then a handoff to the next session. Set the plan file path and which slice(s) this session covers:
+**Mode A — Stay in the loop.** You approve before risky slices and before each commit. One slice (or a few tightly-coupled slices) per chat, then a handoff to the next session:
 
 ```md
 Plan file: <path>
@@ -179,7 +71,7 @@ After the selected slice(s) are committed, use handoff to record state and the n
 Confirm before starting: plan file read, selected slice(s), branch, and the first slice.
 ```
 
-**Mode B — Autonomous full-loop driver.** Use when the plan is well-isolated and you want to step away. The orchestrator runs all remaining slices, delegates hostile drift-audit and independent review per slice, recovers from findings itself, and commits each slice that clears all gates. With a fresh branch per run and a commit per gated slice, the only real downside is wasted time. You assess at the end:
+**Mode B — Step away.** The agent runs all remaining slices, gates each one, and comes back with a summary. It stops on any approval-gated slice or unresolvable problem:
 
 ```md
 Plan file: <path>
@@ -207,6 +99,17 @@ When all slices are complete, write a final summary: slices committed, gate resu
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
 
-## Notes
+## Additional Skills
 
-- Generated files, local artefacts, and selected third-party or separately managed skills are excluded via `.gitignore`
+| Skill | What it does |
+|-------|-------------|
+| [`report`](skills/report/) | Produces structured engineering reports — investigations, bug hunts, comparisons, status updates, or final summaries — with consistent scope, evidence, findings, and next actions. |
+| [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
+
+## Setup
+
+- `AGENTS.md`: global instructions used across AI coding assistants
+- `setup.sh`: links shared AI coding configuration files into local tool directories
+- `tools.conf`: tool registration used by the setup script
+- `skills/`: the skill library
+- Generated files and local artefacts are excluded via `.gitignore`
