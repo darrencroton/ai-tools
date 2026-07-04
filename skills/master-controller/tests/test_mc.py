@@ -302,16 +302,25 @@ Continue later.
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, run_json.parent / "slices" / "slice-001", run_json)
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json)
         self.assertIn("Selected slice: Slice 1 - First Slice", prompt)
         self.assertIn("Authorized surface:", prompt)
         self.assertIn("README.md", prompt)
         self.assertIn("orchestrator-result.json", prompt)
+        self.assertIn(str(mc.skill_root() / "references" / "run-state-schema.md"), prompt)
+        self.assertIn(str(mc.worker_jobs_path()), prompt)
+        self.assertIn(str(slice_artifact_dir / "worker-runs"), prompt)
+        self.assertIn(str(slice_artifact_dir / "copilot-home"), prompt)
+        self.assertIn('run_dir="$(python3 ', prompt)
+        self.assertIn('start --run-dir "$run_dir"', prompt)
 
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
         command = adapter.build_shell_command(Path("/tmp/artifacts"), Path("/tmp/run.json"), self.plan, plan_slice)
+        self.assertIn("AI_ORCHESTRATOR_ARTIFACT_ROOT=/tmp/artifacts/worker-runs", command)
+        self.assertIn("COPILOT_HOME=/tmp/artifacts/copilot-home", command)
         self.assertIn("MC_SLICE_ARTIFACT_DIR=/tmp/artifacts", command)
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
         self.assertTrue(command.endswith("python fake.py"))

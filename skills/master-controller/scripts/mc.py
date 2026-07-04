@@ -170,6 +170,8 @@ class TmuxHarnessAdapter:
         env_prefix = " ".join(
             f"{key}={shlex.quote(value)}"
             for key, value in {
+                "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(slice_artifact_dir / "worker-runs"),
+                "COPILOT_HOME": str(slice_artifact_dir / "copilot-home"),
                 "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
                 "MC_RUN_JSON_PATH": str(run_json),
                 "MC_PLAN_PATH": str(plan_path),
@@ -521,12 +523,20 @@ def load_prompt_template() -> str:
     return match.group("template")
 
 
+def worker_jobs_path() -> Path:
+    return skill_root().parent / "ai-orchestrator" / "scripts" / "worker_jobs.py"
+
+
 def render_orchestrator_prompt(state: dict[str, Any], plan_slice: PlanSlice, slice_artifact_dir: Path, run_json: Path) -> str:
     template = load_prompt_template()
     values = {
         "plan_path": state["plan_path"],
         "run_json_path": str(run_json),
         "slice_artifact_dir": str(slice_artifact_dir),
+        "result_schema_path": str(skill_root() / "references" / "run-state-schema.md"),
+        "worker_jobs_path": str(worker_jobs_path()),
+        "worker_artifact_root": str(slice_artifact_dir / "worker-runs"),
+        "copilot_home": str(slice_artifact_dir / "copilot-home"),
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
         "intended_change": plan_slice.sections.get("Intended Change", ""),

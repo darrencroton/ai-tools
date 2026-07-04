@@ -10,6 +10,10 @@ You are the slice orchestrator for Master Controller.
 Plan file: {plan_path}
 Run state: {run_json_path}
 Slice artifact directory: {slice_artifact_dir}
+Result schema: {result_schema_path}
+Worker helper: {worker_jobs_path}
+Worker artifact root: {worker_artifact_root}
+Copilot home: {copilot_home}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
@@ -41,13 +45,34 @@ Required workflow:
 7. Ask for no remote push, PR, release, deploy, dependency/license change, secret entry, or destructive action unless explicitly authorized in the plan.
 8. Use `commit` only when the slice passes validation, drift audit, and code review.
 
+Worker helper sequence:
+- If you use an external AI worker, launch it through the worker helper so MC gets durable artifacts.
+- MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}` and `COPILOT_HOME={copilot_home}` for this slice.
+- Create one worker run directory before starting workers:
+
+    `run_dir="$(python3 {worker_jobs_path} init --prefix workers)"`
+
+- Start each worker with an explicit run directory and label:
+
+    `python3 {worker_jobs_path} start --run-dir "$run_dir" --label <nn>-<tool>-<subtask-slug> -- <worker command>`
+
+- Monitor and read the worker through the same run directory:
+
+    `python3 {worker_jobs_path} activity --run-dir "$run_dir" --label <label>`
+    `python3 {worker_jobs_path} wait --run-dir "$run_dir" --label <label> --timeout <seconds>`
+    `python3 {worker_jobs_path} extract --run-dir "$run_dir" --label <label>`
+
+- If a worker must be stopped, use:
+
+    `python3 {worker_jobs_path} cancel --run-dir "$run_dir" --label <label>`
+
 Write these artifacts under `{slice_artifact_dir}`:
 - `validation-summary.md`
 - `drift-audit.md`
 - `code-review.md`
 - `orchestrator-result.json`
 
-The final `orchestrator-result.json` must match the schema in `references/run-state-schema.md`.
+The final `orchestrator-result.json` must match the schema in `{result_schema_path}`.
 ```
 
 ## Stop Conditions
