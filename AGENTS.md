@@ -14,6 +14,17 @@ These instructions apply to all projects across all AI coding assistants (Claude
 
 ---
 
+## Delegation & Model Selection
+
+- For every non-trivial coding task, explicitly consider whether a subagent should be used for implementation support, independent analysis, testing, or review
+- Choose the least expensive and lowest effort model that is likely to handle the delegated work reliably
+- Escalate to a stronger model and/or higher effort level when the task is complex, architectural, scientific, security-sensitive, performance-sensitive, cross-cutting, or when the current agent may not be strong enough for the required reasoning
+- Delegation does not transfer responsibility: the main agent remains accountable for the final implementation, must review subagent output critically, and must verify changes before reporting success
+- Do not spawn subagents for trivial edits, quick factual checks, or tasks where delegation overhead exceeds the benefit
+- When running long or noisy commands through a subagent, have it capture output and return a concise pass/fail summary with key evidence, not raw logs
+
+---
+
 ## Git Workflow
 
 - Never use `--no-verify` or bypass hooks
