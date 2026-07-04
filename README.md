@@ -10,7 +10,9 @@ Use these skills when you want AI to help you implement features and fix bugs wi
 
 **Hand it over and come back when it's done.** Give the agent a complete plan and let it run all remaining slices on its own — implementing, auditing scope, reviewing quality, and committing each slice that passes all gates. It stops if it hits a slice you've flagged for human approval or a problem it can't resolve within the agreed contract. Good when the plan is well-isolated and the cost of an error is low.
 
-Both paths use the same skill chain. They differ only in who holds the gates and when handoff happens.
+**Supervise the run mechanically.** Use `master-controller` when you want the gatekeeper outside the slice orchestrator. It launches each slice in a fresh tmux-backed harness session, records durable artifacts, verifies the structured result against git state and plan authorization, and advances only when the gates pass.
+
+All paths use the same underlying skill chain. They differ in who holds the gates, how much state is captured mechanically, and when handoff happens.
 
 ## Skills
 
@@ -19,7 +21,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | Skill | What it does |
 |-------|-------------|
 | [`implementation-plan`](skills/implementation-plan/) | Breaks a request into auditable slices, with optional batches when stronger implementers can safely combine related slices. Each slice gets acceptance criteria, an authorized surface, validation, risk flags, and a copyable prompt for the next chat. |
-| [`master-controller`](skills/master-controller/) | Supervises execution of an existing implementation plan one slice at a time. Creates durable run state, checks slice eligibility, and later owns tmux supervision and gate verification without becoming a planner. |
+| [`master-controller`](skills/master-controller/) | Supervises execution of an existing implementation plan one slice at a time. Creates durable run state, checks slice eligibility, launches tmux-backed harness sessions, captures artifacts, and verifies gates without becoming a planner. |
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope. Restates the authorized surface before coding, stays inside approved files, and prepares a receipt for drift audit. |
 | [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Compares actual changes against the frozen contract before any quality review. |
 | [`code-review`](skills/code-review/) | Performs a senior-level review after drift audit passes. Covers correctness, edge cases, tests, error handling, maintainability, and domain-specific risks. |
@@ -42,7 +44,7 @@ The default flow for feature or bug work:
 6. **Hand off** (if needed) — call `handoff` before ending a session that isn't finished.
 7. **Commit** — call `commit` only after you approve.
 
-Use `ai-orchestrator` when delegation improves quality, speed, or context management, such as independent review, plan critique, codebase mapping, or long-running validation.
+Use `ai-orchestrator` when delegation improves quality, speed, or context management, such as independent review, plan critique, codebase mapping, or long-running validation. Use `master-controller` when you want the same plan execution guarded by durable state and external gate verification.
 
 Use explicit skill calls. Do not rely on the model to guess which workflow applies.
 
@@ -103,6 +105,21 @@ When all slices are complete, write a final summary: slices committed, gate resu
 
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
+
+**MC workflow — external supervisor.** Use `master-controller` when the plan is complete and you want a local controller to run eligible slices through a fresh tmux-backed harness session with durable artifacts and gate verification:
+
+```bash
+python3 skills/master-controller/scripts/mc.py init \
+  --repo /path/to/repo \
+  --plan /path/to/plan.md \
+  --harness codex
+
+python3 skills/master-controller/scripts/mc.py run-next --repo /path/to/repo --dry-run
+python3 skills/master-controller/scripts/mc.py run --repo /path/to/repo --scope remaining
+python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
+```
+
+MC is still not a planner. It consumes the implementation-plan contract, refuses incomplete or approval-gated slices, and stops on missing evidence, failed validation, drift, review failure, unauthorized files, dirty post-commit state, harness failure, or any condition outside policy.
 
 ## Setup
 
