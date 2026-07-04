@@ -31,7 +31,7 @@ Docker and container setup are out of scope. MC may run inside a container or on
 5. **Verify gates** - independently compare the orchestrator result to git state, plan authorization, validation, drift audit verdict, review verdict, and commit state.
 6. **Advance or stop** - move to the next slice only when every gate passes. Stop with a precise reason for human approval, drift, failed validation, failed review, harness failure, or incomplete evidence.
 
-The initial CLI supports state creation and dry-run eligibility checks without launching tmux. Runtime execution and gate verification are added in later slices.
+The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries.
 
 ## Safety Rules
 
@@ -67,9 +67,12 @@ python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> 
 python3 skills/master-controller/scripts/mc.py status --repo <path>
 python3 skills/master-controller/scripts/mc.py summarize --repo <path>
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --dry-run
+python3 skills/master-controller/scripts/mc.py run-next --repo <path>
+python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining
+python3 skills/master-controller/scripts/mc.py stop --repo <path> --reason <reason>
 ```
 
-`run-next` without `--dry-run`, `run --scope remaining`, and `stop` are intentionally deferred until the runtime slices.
+Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails.
 
 ## References
 

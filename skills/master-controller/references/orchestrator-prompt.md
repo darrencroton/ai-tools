@@ -13,6 +13,7 @@ Slice artifact directory: {slice_artifact_dir}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
+Commit creation is authorized only for this selected slice after validation, drift audit, and code review pass. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, or perform destructive actions unless the frozen plan explicitly authorizes that action.
 
 Frozen contract:
 - Intended change:
@@ -38,7 +39,7 @@ Required workflow:
 5. If drift audit passes, apply `code-review`.
 6. Fix material review findings inside the contract, then re-run the relevant validation and gate.
 7. Ask for no remote push, PR, release, deploy, dependency/license change, secret entry, or destructive action unless explicitly authorized in the plan.
-8. Use `commit` only when the slice passes validation, drift audit, and code review, and the prompt explicitly authorizes commit creation.
+8. Use `commit` only when the slice passes validation, drift audit, and code review.
 
 Write these artifacts under `{slice_artifact_dir}`:
 - `validation-summary.md`

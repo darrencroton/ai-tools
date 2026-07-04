@@ -4,16 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import platform
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any
 
 
@@ -29,10 +32,21 @@ REQUIRED_SECTIONS = (
     "Rollback Path",
 )
 COMPLETED_SLICE_STATUSES = {"pass", "committed", "complete"}
+ORCHESTRATOR_STATUSES = {"pass", "repairable", "needs-human", "fail", "blocked"}
+RUN_STOP_STATUSES = {"needs-human", "blocked", "failed", "cancelled"}
+DEFAULT_TIMEOUT_SECONDS = 1800
+DEFAULT_POLL_SECONDS = 2.0
 
 
 class McError(Exception):
     """User-facing MC error."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +90,92 @@ class PlanSlice:
         return None
 
 
+@dataclass(frozen=True)
+class GateDecision:
+    status: str
+    reason: str
+    result: dict[str, Any] | None = None
+    actual_changed_files: tuple[str, ...] = ()
+
+
+class TmuxHarnessAdapter:
+    """Single tmux-backed harness adapter for the configured command."""
+
+    def __init__(self, harness_name: str, command_override: str | None = None):
+        self.harness_name = harness_name
+        self.command = command_override or harness_name
+
+    def preflight(self) -> None:
+        if not shutil.which("tmux"):
+            raise McError("tmux is required for runtime execution")
+        executable = shlex.split(self.command)[0] if self.command.strip() else ""
+        if not executable:
+            raise McError("harness command is empty")
+        if not shutil.which(executable):
+            raise McError(f"harness command not found: {executable}")
+
+    def build_shell_command(self, slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> str:
+        env_prefix = " ".join(
+            f"{key}={shlex.quote(value)}"
+            for key, value in {
+                "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
+                "MC_RUN_JSON_PATH": str(run_json),
+                "MC_PLAN_PATH": str(plan_path),
+                "MC_SLICE_ID": plan_slice.slice_id,
+            }.items()
+        )
+        return f"{env_prefix} {self.command}"
+
+    def start(self, repo: Path, session_name: str, slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> None:
+        self.preflight()
+        shell_command = self.build_shell_command(slice_artifact_dir, run_json, plan_path, plan_slice)
+        run_command(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                str(repo),
+                shell_command,
+            ],
+            error_prefix="tmux start failed",
+        )
+
+    def send_prompt(self, session_name: str, prompt_path: Path) -> None:
+        buffer_name = f"{session_name}_prompt"
+        run_command(["tmux", "load-buffer", "-b", buffer_name, str(prompt_path)], error_prefix="tmux prompt load failed")
+        run_command(["tmux", "paste-buffer", "-b", buffer_name, "-t", session_name], error_prefix="tmux prompt paste failed")
+        run_command(["tmux", "send-keys", "-t", session_name, "C-m"], error_prefix="tmux prompt submit failed")
+        run_command(["tmux", "delete-buffer", "-b", buffer_name], allow_failure=True)
+
+    def capture(self, session_name: str, destination: Path) -> None:
+        result = run_command(["tmux", "capture-pane", "-p", "-S", "-32768", "-t", session_name], allow_failure=True)
+        if result.returncode == 0:
+            destination.write_text(result.stdout, encoding="utf-8")
+        else:
+            destination.write_text("tmux pane was unavailable during capture\n", encoding="utf-8")
+
+    def session_exists(self, session_name: str) -> bool:
+        return run_command(["tmux", "has-session", "-t", session_name], allow_failure=True).returncode == 0
+
+    def detect_activity(self, session_name: str, previous_capture: str) -> dict[str, Any]:
+        if not self.session_exists(session_name):
+            return {"running": False, "active": False, "capture": ""}
+        result = run_command(["tmux", "capture-pane", "-p", "-S", "-32768", "-t", session_name], allow_failure=True)
+        capture = result.stdout if result.returncode == 0 else ""
+        return {"running": True, "active": capture != previous_capture, "capture": capture}
+
+    def request_stop(self, session_name: str) -> None:
+        if self.session_exists(session_name):
+            run_command(["tmux", "send-keys", "-t", session_name, "C-c"], allow_failure=True)
+
+    def force_stop(self, session_name: str) -> None:
+        if self.session_exists(session_name):
+            run_command(["tmux", "kill-session", "-t", session_name], allow_failure=True)
+
+
 def _bullet_values(text: str) -> list[str]:
     values: list[str] = []
     for line in text.splitlines():
@@ -107,6 +207,95 @@ def git(repo: Path, *args: str) -> str:
         message = result.stderr.strip() or result.stdout.strip() or "git command failed"
         raise McError(message)
     return result.stdout.strip()
+
+
+def run_command(command: list[str], *, error_prefix: str = "command failed", allow_failure: bool = False) -> CommandResult:
+    result = subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    command_result = CommandResult(result.returncode, result.stdout, result.stderr)
+    if result.returncode != 0 and not allow_failure:
+        message = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise McError(f"{error_prefix}: {message}")
+    return command_result
+
+
+def git_result(repo: Path, *args: str) -> CommandResult:
+    return run_command(["git", "-C", str(repo), *args], allow_failure=True)
+
+
+def git_head(repo: Path) -> str | None:
+    result = git_result(repo, "rev-parse", "--verify", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git_status_text(repo: Path) -> str:
+    return git(repo, "status", "--short", "--untracked-files=all")
+
+
+def status_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1]
+    return path.strip().strip('"')
+
+
+def meaningful_status_lines(status_text: str) -> list[str]:
+    lines: list[str] = []
+    for line in status_text.splitlines():
+        path = status_path(line)
+        if path == ".ai-mc" or path.startswith(".ai-mc/"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def require_clean_worktree(repo: Path) -> None:
+    dirty = meaningful_status_lines(git_status_text(repo))
+    if dirty:
+        raise McError("starting git state is dirty outside .ai-mc/: " + "; ".join(dirty))
+
+
+def status_changed_files(status_text: str) -> set[str]:
+    return {status_path(line) for line in meaningful_status_lines(status_text)}
+
+
+def changed_files_between(repo: Path, before_head: str | None, after_head: str | None, after_status: str) -> set[str]:
+    files: set[str] = set()
+    if before_head and after_head and before_head != after_head:
+        files.update(git(repo, "diff", "--name-only", before_head, after_head).splitlines())
+    elif after_head and before_head is None:
+        files.update(git(repo, "show", "--name-only", "--format=", after_head).splitlines())
+    files.update(status_changed_files(after_status))
+    return {path for path in files if path}
+
+
+def write_git_diff(repo: Path, before_head: str | None, after_head: str | None, destination: Path) -> None:
+    if before_head and after_head and before_head != after_head:
+        result = git_result(repo, "diff", "--binary", before_head, after_head)
+    else:
+        result = git_result(repo, "diff", "--binary")
+    destination.write_text(result.stdout if result.returncode == 0 else result.stderr, encoding="utf-8")
+
+
+def normalize_authorized_entry(entry: str) -> str:
+    return entry.strip().strip("`").rstrip(".")
+
+
+def is_authorized_path(path: str, authorized_entries: list[str]) -> bool:
+    for raw_entry in authorized_entries:
+        entry = normalize_authorized_entry(raw_entry)
+        if entry.endswith("/"):
+            if path.startswith(entry):
+                return True
+        elif any(marker in entry for marker in ("*", "?", "[")):
+            if fnmatch.fnmatch(path, entry):
+                return True
+        elif path == entry:
+            return True
+    return False
+
+
+def unauthorized_files(changed_files: set[str], authorized_entries: list[str]) -> list[str]:
+    return sorted(path for path in changed_files if not is_authorized_path(path, authorized_entries))
 
 
 def resolve_repo(path: Path) -> Path:
@@ -186,6 +375,11 @@ def resolve_run_path(repo: Path, value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def resolve_run_dir(repo: Path, value: str) -> Path:
+    path = resolve_run_path(repo, value).resolve()
+    return path.parent if path.is_file() else path
+
+
 def completed_slice_ids(state: dict[str, Any]) -> set[str]:
     complete: set[str] = set()
     for entry in state.get("slices", []):
@@ -226,6 +420,175 @@ def environment_preflight() -> dict[str, Any]:
         "python_version": platform.python_version(),
         "git": shutil.which("git"),
         "tmux": shutil.which("tmux"),
+    }
+
+
+def skill_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def load_prompt_template() -> str:
+    path = skill_root() / "references" / "orchestrator-prompt.md"
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"```md\n(?P<template>.*?)\n```", text, flags=re.DOTALL)
+    if not match:
+        raise McError(f"orchestrator prompt template not found in {path}")
+    return match.group("template")
+
+
+def render_orchestrator_prompt(state: dict[str, Any], plan_slice: PlanSlice, slice_artifact_dir: Path, run_json: Path) -> str:
+    template = load_prompt_template()
+    values = {
+        "plan_path": state["plan_path"],
+        "run_json_path": str(run_json),
+        "slice_artifact_dir": str(slice_artifact_dir),
+        "slice_id": plan_slice.slice_id,
+        "slice_title": plan_slice.title,
+        "intended_change": plan_slice.sections.get("Intended Change", ""),
+        "acceptance_criteria": plan_slice.sections.get("Acceptance Criteria", ""),
+        "authorized_surface": plan_slice.sections.get("Authorized Surface", ""),
+        "explicit_non_goals": plan_slice.sections.get("Explicit Non-Goals", ""),
+        "risk_flags": plan_slice.sections.get("Risk Flags", ""),
+        "validation_plan": plan_slice.sections.get("Validation Plan", ""),
+        "rollback_path": plan_slice.sections.get("Rollback Path", ""),
+    }
+    return template.format(**values).rstrip() + "\n"
+
+
+def slice_dir_name(plan_slice: PlanSlice) -> str:
+    return f"slice-{plan_slice.number:03d}"
+
+
+def tmux_session_name(run_id_value: str, plan_slice: PlanSlice, attempt: int) -> str:
+    raw = f"mc_{run_id_value}_{slice_dir_name(plan_slice)}_a{attempt}"
+    return re.sub(r"[^A-Za-z0-9_-]", "_", raw)[:80]
+
+
+def relative_artifact_path(repo: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(repo))
+    except ValueError:
+        return str(path)
+
+
+def load_orchestrator_result(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise McError(f"orchestrator result missing: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise McError(f"invalid orchestrator result: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise McError(f"orchestrator result is not an object: {path}")
+    return data
+
+
+def artifact_exists(repo: Path, slice_artifact_dir: Path, result: dict[str, Any], field: str, default_name: str) -> bool:
+    configured = result.get(field, {}).get("path") if isinstance(result.get(field), dict) else None
+    if not configured:
+        return (slice_artifact_dir / default_name).exists()
+    candidate = Path(configured)
+    if candidate.is_absolute():
+        return candidate.exists()
+    return any((base / candidate).exists() for base in (slice_artifact_dir, repo))
+
+
+def object_field(result: dict[str, Any], field: str) -> dict[str, Any]:
+    value = result.get(field)
+    return value if isinstance(value, dict) else {}
+
+
+def verify_gate(
+    repo: Path,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    before_head: str | None,
+    after_head: str | None,
+    after_status: str,
+) -> GateDecision:
+    result_path = slice_artifact_dir / "orchestrator-result.json"
+    try:
+        result = load_orchestrator_result(result_path)
+    except McError as exc:
+        return GateDecision("blocked", str(exc))
+
+    if result.get("schema_version") != SCHEMA_VERSION:
+        return GateDecision("fail", "orchestrator result schema_version is missing or unsupported", result)
+    if result.get("slice_id") != plan_slice.slice_id:
+        return GateDecision("fail", "orchestrator result slice_id does not match selected slice", result)
+
+    status_value = str(result.get("status", "")).lower()
+    if status_value not in ORCHESTRATOR_STATUSES:
+        return GateDecision("fail", f"orchestrator result status is invalid: {result.get('status')}", result)
+    if status_value != "pass":
+        return GateDecision(status_value, f"orchestrator reported {status_value}", result)
+
+    actual_changed = changed_files_between(repo, before_head, after_head, after_status)
+    unauthorized = unauthorized_files(actual_changed, plan_slice.authorized_files)
+    if unauthorized:
+        return GateDecision("fail", "unauthorized changed files: " + ", ".join(unauthorized), result, tuple(sorted(actual_changed)))
+
+    reported_changed = set(result.get("changed_files") or [])
+    if actual_changed != reported_changed:
+        return GateDecision(
+            "fail",
+            "orchestrator changed_files does not match git evidence",
+            result,
+            tuple(sorted(actual_changed)),
+        )
+
+    validation = result.get("validation")
+    if not isinstance(validation, list) or not validation:
+        return GateDecision("fail", "validation evidence is missing", result, tuple(sorted(actual_changed)))
+    failing_validation = [entry for entry in validation if str(entry.get("result", "")).lower() != "pass"]
+    if failing_validation:
+        return GateDecision("fail", "validation did not pass", result, tuple(sorted(actual_changed)))
+    if not (slice_artifact_dir / "validation-summary.md").exists():
+        return GateDecision("fail", "validation-summary.md is missing", result, tuple(sorted(actual_changed)))
+
+    drift_verdict = str(object_field(result, "drift_audit").get("verdict", "")).upper()
+    if drift_verdict != "PASS":
+        return GateDecision("needs-human", f"drift audit verdict is not PASS: {drift_verdict or 'missing'}", result, tuple(sorted(actual_changed)))
+    if not artifact_exists(repo, slice_artifact_dir, result, "drift_audit", "drift-audit.md"):
+        return GateDecision("fail", "drift audit artifact is missing", result, tuple(sorted(actual_changed)))
+
+    review_verdict = str(object_field(result, "code_review").get("verdict", "")).upper()
+    if review_verdict != "PASS":
+        return GateDecision("fail", f"code review verdict is not PASS: {review_verdict or 'missing'}", result, tuple(sorted(actual_changed)))
+    if not artifact_exists(repo, slice_artifact_dir, result, "code_review", "code-review.md"):
+        return GateDecision("fail", "code review artifact is missing", result, tuple(sorted(actual_changed)))
+
+    commit = result.get("commit") if isinstance(result.get("commit"), dict) else {}
+    if state.get("policy", {}).get("commit_required", True):
+        if not commit.get("requested") or not commit.get("created") or not commit.get("hash"):
+            return GateDecision("fail", "required commit was not created", result, tuple(sorted(actual_changed)))
+        commit_hash = git(repo, "rev-parse", str(commit["hash"]))
+        if after_head != commit_hash:
+            return GateDecision("fail", "reported commit is not the current HEAD", result, tuple(sorted(actual_changed)))
+        if meaningful_status_lines(after_status):
+            return GateDecision("fail", "post-commit worktree is dirty outside .ai-mc/", result, tuple(sorted(actual_changed)))
+
+    return GateDecision("pass", "all gates passed", result, tuple(sorted(actual_changed)))
+
+
+def slice_entry_from_gate(repo: Path, plan_slice: PlanSlice, slice_artifact_dir: Path, started_at: str, gate: GateDecision) -> dict[str, Any]:
+    result = gate.result or {}
+    return {
+        "slice_id": plan_slice.slice_id,
+        "title": plan_slice.title,
+        "status": gate.status,
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "artifact_dir": relative_artifact_path(repo, slice_artifact_dir),
+        "changed_files": list(gate.actual_changed_files or tuple(result.get("changed_files") or ())),
+        "validation": result.get("validation", []),
+        "drift_audit": result.get("drift_audit", {"verdict": None, "path": ""}),
+        "code_review": result.get("code_review", {"verdict": None, "path": ""}),
+        "commit": result.get("commit", {"requested": False, "created": False, "hash": None}),
+        "next_action": result.get("next_action", ""),
+        "blockers": result.get("blockers", []),
+        "gate_reason": gate.reason,
     }
 
 
@@ -318,11 +681,150 @@ def summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def update_state_for_stop(run_json: Path, state: dict[str, Any], status_value: str, reason: str) -> None:
+    state["status"] = status_value
+    state["stop_reason"] = reason
+    state["current_slice"] = None
+    write_run(run_json, state)
+
+
+def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_dir: Path) -> int:
+    runnable, reasons = eligibility(plan_slice)
+    run_json = run_dir / "run.json"
+    if not runnable:
+        update_state_for_stop(run_json, state, "needs-human", "; ".join(reasons))
+        print(f"Next slice: {plan_slice.slice_id} - {plan_slice.title}")
+        print("Eligibility: blocked")
+        for reason in reasons:
+            print(f"- {reason}")
+        return 2
+
+    try:
+        require_clean_worktree(repo)
+    except McError as exc:
+        update_state_for_stop(run_json, state, "needs-human", str(exc))
+        print(f"{plan_slice.slice_id} stopped: {exc}")
+        return 2
+    slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
+    slice_artifact_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = slice_artifact_dir / "prompt.md"
+    prompt_path.write_text(render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json), encoding="utf-8")
+
+    adapter = TmuxHarnessAdapter(state["harness"]["name"], getattr(args, "harness_command", None))
+    max_attempts = int(state.get("policy", {}).get("max_repair_attempts", 1)) + 1
+    last_gate: GateDecision | None = None
+    for attempt in range(1, max_attempts + 1):
+        started_at = utc_now()
+        before_head = git_head(repo)
+        before_status = git_status_text(repo)
+        (slice_artifact_dir / f"git-status-before-attempt-{attempt}.txt").write_text(before_status, encoding="utf-8")
+        (slice_artifact_dir / "git-status-before.txt").write_text(before_status, encoding="utf-8")
+        session_name = tmux_session_name(state["run_id"], plan_slice, attempt)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": plan_slice.slice_id,
+            "title": plan_slice.title,
+            "artifact_dir": relative_artifact_path(repo, slice_artifact_dir),
+            "tmux_session": session_name,
+            "attempt": attempt,
+            "started_at": started_at,
+        }
+        state["stop_reason"] = None
+        write_run(run_json, state)
+
+        try:
+            result_path = slice_artifact_dir / "orchestrator-result.json"
+            if result_path.exists():
+                result_path.unlink()
+            adapter.start(repo, session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
+            adapter.send_prompt(session_name, prompt_path)
+            deadline = time.monotonic() + float(args.timeout_seconds)
+            timed_out = False
+            previous_capture = ""
+            activity_log = slice_artifact_dir / f"activity-attempt-{attempt}.jsonl"
+            while not result_path.exists():
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                activity = adapter.detect_activity(session_name, previous_capture)
+                previous_capture = str(activity.get("capture", ""))
+                with activity_log.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "checked_at": utc_now(),
+                                "running": bool(activity.get("running")),
+                                "active": bool(activity.get("active")),
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                if not activity.get("running"):
+                    break
+                time.sleep(float(args.poll_seconds))
+
+            adapter.capture(session_name, slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt")
+            (slice_artifact_dir / "pane-capture.txt").write_text(
+                (slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            if timed_out:
+                adapter.request_stop(session_name)
+                time.sleep(min(float(args.poll_seconds), 1.0))
+                adapter.capture(session_name, slice_artifact_dir / "pane-capture-timeout.txt")
+                adapter.force_stop(session_name)
+                after_head = git_head(repo)
+                after_status = git_status_text(repo)
+                (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
+                (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
+                write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+                last_gate = GateDecision("blocked", "timeout waiting for orchestrator-result.json")
+            else:
+                adapter.force_stop(session_name)
+                after_head = git_head(repo)
+                after_status = git_status_text(repo)
+                (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
+                (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
+                write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+                last_gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
+        except McError as exc:
+            adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt")
+            adapter.force_stop(session_name)
+            after_head = git_head(repo)
+            after_status = git_status_text(repo)
+            (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
+            (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
+            write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+            last_gate = GateDecision("failed", str(exc))
+
+        if last_gate.status == "repairable" and attempt < max_attempts:
+            continue
+        entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, last_gate)
+        state["slices"].append(entry)
+        state["current_slice"] = None
+        if last_gate.status == "pass":
+            state["status"] = "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "initialized"
+            state["stop_reason"] = None
+            write_run(run_json, state)
+            print(f"{plan_slice.slice_id} passed MC gates.")
+            return 0
+        status_value = "failed" if last_gate.status == "fail" else last_gate.status
+        if status_value not in RUN_STOP_STATUSES:
+            status_value = "blocked"
+        update_state_for_stop(run_json, state, status_value, last_gate.reason)
+        print(f"{plan_slice.slice_id} stopped: {last_gate.reason}")
+        return 2
+
+    fallback = last_gate or GateDecision("blocked", "slice ended without a gate decision")
+    update_state_for_stop(run_json, state, "blocked", fallback.reason)
+    return 2
+
+
 def run_next(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        raise McError("run-next execution is not implemented in this slice; use --dry-run")
     repo = resolve_repo(Path(args.repo))
-    state = load_run(resolve_run_path(repo, args.run))
+    run_dir = resolve_run_dir(repo, args.run)
+    state = load_run(run_dir)
     plan = resolve_plan(Path(state["plan_path"]))
     slices = parse_plan(plan)
     if not slices:
@@ -338,11 +840,54 @@ def run_next(args: argparse.Namespace) -> int:
         print("Authorized files:")
         for path in candidate.authorized_files:
             print(f"- {path}")
+        if not args.dry_run:
+            return execute_slice(args, repo, state, candidate, run_dir)
         return 0
     print("Eligibility: blocked")
     for reason in reasons:
         print(f"- {reason}")
+    if not args.dry_run:
+        update_state_for_stop(run_dir / "run.json", state, "needs-human", "; ".join(reasons))
     return 2
+
+
+def run_remaining(args: argparse.Namespace) -> int:
+    if args.scope != "remaining":
+        raise McError("only --scope remaining is supported")
+    repo = resolve_repo(Path(args.repo))
+    while True:
+        run_dir = resolve_run_dir(repo, args.run)
+        state = load_run(run_dir)
+        if state.get("status") in RUN_STOP_STATUSES:
+            print(f"Run is stopped: {state['status']}")
+            return 2
+        slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+        if next_slice(slices, state) is None:
+            state["status"] = "complete"
+            state["current_slice"] = None
+            state["stop_reason"] = None
+            write_run(run_dir / "run.json", state)
+            print("All slices complete.")
+            return 0
+        code = run_next(args)
+        if code != 0:
+            return code
+
+
+def stop(args: argparse.Namespace) -> int:
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    state = load_run(run_dir)
+    current = state.get("current_slice") or {}
+    session_name = current.get("tmux_session")
+    if session_name:
+        adapter = TmuxHarnessAdapter(state["harness"]["name"], getattr(args, "harness_command", None))
+        adapter.request_stop(str(session_name))
+        time.sleep(0.5)
+        adapter.force_stop(str(session_name))
+    update_state_for_stop(run_dir / "run.json", state, "cancelled", args.reason)
+    print(f"Run cancelled: {args.reason}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -369,7 +914,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_next_parser.add_argument("--repo", default=".", help="target git repository")
     run_next_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
     run_next_parser.add_argument("--dry-run", action="store_true", help="only report next-slice eligibility")
+    run_next_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for orchestrator result")
+    run_next_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
+    run_next_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
     run_next_parser.set_defaults(func=run_next)
+
+    run_parser = subparsers.add_parser("run", help="run eligible slices until complete or stopped")
+    run_parser.add_argument("--repo", default=".", help="target git repository")
+    run_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
+    run_parser.add_argument("--scope", required=True, choices=["remaining"], help="run scope")
+    run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for each orchestrator result")
+    run_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
+    run_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    run_parser.set_defaults(func=run_remaining, dry_run=False)
+
+    stop_parser = subparsers.add_parser("stop", help="cancel the current MC run")
+    stop_parser.add_argument("--repo", default=".", help="target git repository")
+    stop_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
+    stop_parser.add_argument("--reason", default="cancelled by user", help="reason recorded in run state")
+    stop_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    stop_parser.set_defaults(func=stop)
 
     return parser
 

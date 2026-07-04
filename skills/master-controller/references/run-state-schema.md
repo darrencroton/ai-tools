@@ -34,7 +34,14 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "slice_count": 4,
     "parser": "implementation-plan-markdown-v1"
   },
-  "current_slice": null,
+  "current_slice": {
+    "slice_id": "Slice 1",
+    "title": "Define Skill Contract and Reference Docs",
+    "artifact_dir": ".ai-mc/runs/20260704T013000Z/slices/slice-001",
+    "tmux_session": "mc_20260704T013000Z_slice-001_a1",
+    "attempt": 1,
+    "started_at": "2026-07-04T01:35:00Z"
+  },
   "slices": [],
   "stop_reason": null
 }
@@ -78,11 +85,14 @@ Runtime slices append entries to `slices`:
     "hash": "abc123"
   },
   "next_action": "",
-  "blockers": []
+  "blockers": [],
+  "gate_reason": "all gates passed"
 }
 ```
 
 Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
+
+Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
 ## `orchestrator-result.json`
 

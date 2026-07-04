@@ -8,10 +8,10 @@ An adapter provides:
 
 - `name`: stable harness identifier such as `codex`.
 - `preflight`: command or function that checks local availability without starting a run.
-- `build_start_command`: returns the shell command used inside tmux.
+- `build_start_command`: returns the shell command used inside tmux, including MC environment variables for the run state, plan path, slice id, and slice artifact directory.
 - `send_prompt`: injects the rendered orchestrator prompt into the tmux session.
 - `capture`: writes transcript or pane output to the slice artifact directory.
-- `detect_activity`: reports whether the session is still active or idle.
+- `detect_activity`: reports whether the session is still active or idle as `{"running": bool, "active": bool, "capture": string}`.
 - `detect_completion`: checks for explicit completion markers or structured result creation.
 - `request_stop`: asks the harness to stop gracefully.
 - `force_stop`: terminates the tmux session after timeout or failed graceful stop.
@@ -32,6 +32,8 @@ For each slice, the adapter must allow MC to capture:
 - Every slice starts in a fresh tmux session.
 - Session names must include the run id and slice id.
 - The working directory must be the target repo/worktree.
+- The harness receives `MC_SLICE_ARTIFACT_DIR`, `MC_RUN_JSON_PATH`, `MC_PLAN_PATH`, and `MC_SLICE_ID` in its environment.
+- MC records activity checks as JSON lines with `checked_at`, `running`, and `active` fields.
 - MC must be able to capture pane output before and after stop.
 - MC must close the session after completion or timeout.
 
