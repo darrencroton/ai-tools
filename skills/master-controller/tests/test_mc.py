@@ -317,6 +317,16 @@ Continue later.
         self.assertIn('run_dir="$(python3 ', prompt)
         self.assertIn('start --run-dir "$run_dir"', prompt)
         self.assertIn("worker-evidence.md", prompt)
+        self.assertIn("Required worker tool(s) for this run: none configured for this run", prompt)
+
+    def test_prompt_rendering_states_configured_worker_tools_authoritatively(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        plan_slice = mc.parse_plan(self.plan)[0]
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
+        self.assertIn("Required worker tool(s) for this run: codex", prompt)
+        self.assertIn("authoritative for which worker tool(s) to use", prompt)
 
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]

@@ -16,9 +16,11 @@ Worker artifact root: {worker_artifact_root}
 Slice temp directory: {slice_tmp_dir}
 Tool home root: {tool_home_root}
 Copilot home: {copilot_home}
+Required worker tool(s) for this run: {worker_tools}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
+The `Required worker tool(s) for this run` line above is authoritative for which worker tool(s) to use. If the plan's validation-plan prose names a different or additional tool (for example, wording carried over from a previous test run with a different harness/worker combination), use the tool(s) configured for this run instead, and note the discrepancy in `worker-evidence.md`. If it says "none configured for this run", only launch a worker if the plan explicitly requires one, and use your own judgement for an appropriate tool.
 Commit creation is authorized only for this selected slice after validation, drift audit, and code review pass. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, or perform destructive actions unless the frozen plan explicitly authorizes that action.
 
 Frozen contract:

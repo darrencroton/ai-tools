@@ -641,7 +641,13 @@ def load_prompt_template() -> str:
     return match.group("template")
 
 
-def render_orchestrator_prompt(state: dict[str, Any], plan_slice: PlanSlice, slice_artifact_dir: Path, run_json: Path) -> str:
+def render_orchestrator_prompt(
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    run_json: Path,
+    worker_tools: tuple[str, ...] = (),
+) -> str:
     template = load_prompt_template()
     paths = slice_paths(slice_artifact_dir)
     values = {
@@ -654,6 +660,7 @@ def render_orchestrator_prompt(state: dict[str, Any], plan_slice: PlanSlice, sli
         "slice_tmp_dir": str(paths["tmp_dir"]),
         "tool_home_root": str(paths["tool_home_root"]),
         "copilot_home": str(paths["copilot_home"]),
+        "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
         "intended_change": plan_slice.sections.get("Intended Change", ""),
@@ -920,7 +927,11 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
     ensure_slice_runtime_dirs(slice_artifact_dir)
     prompt_path = slice_artifact_dir / "prompt.md"
-    prompt_path.write_text(render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json), encoding="utf-8")
+    configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
+    prompt_path.write_text(
+        render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, configured_worker_tools),
+        encoding="utf-8",
+    )
 
     adapter = TmuxHarnessAdapter(
         state["harness"]["name"],
