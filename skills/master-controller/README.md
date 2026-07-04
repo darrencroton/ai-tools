@@ -99,6 +99,10 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 `run-next --dry-run` exits successfully only when the next uncompleted slice has the required sections, has a non-empty authorized file surface, and is not approval-gated. Runtime execution also requires a clean target worktree outside `.ai-mc/`.
 
+## Internal Layout
+
+`scripts/mc.py` is intentionally a thin, stable executable wrapper. The implementation lives in `scripts/mc_lib/`, grouped by responsibility: CLI construction, command handlers, plan parsing, run state, git/process helpers, harness profiles, tmux control, runtime artifacts, and gate verification. Keep public CLI behavior, run-state JSON, artifact names, and environment variables stable when editing these modules.
+
 ## Default MC Execution Flow
 
 When a user provides a complete implementation plan and asks MC to implement it, the MC should not need a bespoke launch prompt. Use this sequence unless the user specifies a different scope or harness:

@@ -20,6 +20,8 @@ mc = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = mc
 SPEC.loader.exec_module(mc)
+from mc_lib import runtime as mc_runtime  # noqa: E402
+from mc_lib import tmux_adapter as mc_tmux_adapter  # noqa: E402
 
 
 def git(repo, *args):
@@ -280,6 +282,24 @@ class MasterControllerTests(unittest.TestCase):
         slices = mc.parse_plan(self.plan)
         self.assertEqual(mc.next_slice(slices, state).slice_id, "Slice 2")
 
+    def test_previous_completed_head_returns_prior_completed_commit(self):
+        state = {
+            "slices": [
+                {
+                    "slice_id": "Slice 1",
+                    "status": "pass",
+                    "commit": {"hash": "a" * 40},
+                },
+                {
+                    "slice_id": "Slice 2",
+                    "status": "fail",
+                    "commit": {"hash": "b" * 40},
+                },
+            ],
+        }
+
+        self.assertEqual(mc.previous_completed_head(state, "Slice 2"), "a" * 40)
+
     def test_final_slice_stops_before_future_work(self):
         self.plan.write_text(
             self.plan.read_text(encoding="utf-8")
@@ -388,7 +408,7 @@ Continue later.
             mc.CommandResult(0, "", ""),
             mc.CommandResult(0, "Do you trust the contents of this directory?", ""),
         ]
-        with mock.patch.object(mc, "run_command", side_effect=calls), mock.patch.object(mc.time, "sleep"):
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep"):
             with self.assertRaisesRegex(mc.McError, "trust prompt"):
                 adapter.wait_until_prompt_ready("session")
 
@@ -398,7 +418,7 @@ Continue later.
             mc.CommandResult(0, "", ""),
             mc.CommandResult(0, "OpenAI Codex\n\n› Summarize recent commits", ""),
         ]
-        with mock.patch.object(mc, "run_command", side_effect=calls), mock.patch.object(mc.time, "sleep") as sleep:
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep") as sleep:
             adapter.wait_until_prompt_ready("session")
         sleep.assert_called()
 
@@ -408,7 +428,7 @@ Continue later.
             mc.CommandResult(0, "", ""),
             mc.CommandResult(0, "new pane text", ""),
         ]
-        with mock.patch.object(mc, "run_command", side_effect=calls):
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls):
             activity = adapter.detect_activity("session", "old pane text")
         self.assertTrue(activity["running"])
         self.assertTrue(activity["active"])
@@ -416,7 +436,7 @@ Continue later.
 
     def test_adapter_detect_activity_reports_stopped_session(self):
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
-        with mock.patch.object(mc, "run_command", return_value=mc.CommandResult(1, "", "missing")):
+        with mock.patch.object(mc_tmux_adapter, "run_command", return_value=mc.CommandResult(1, "", "missing")):
             activity = adapter.detect_activity("session", "old pane text")
         self.assertFalse(activity["running"])
         self.assertFalse(activity["active"])
@@ -875,7 +895,7 @@ Continue later.
         expected_source = Path(self.tmp.name) / "claude-project" / f"{session_id}.jsonl"
         expected_source.parent.mkdir(parents=True)
         expected_source.write_text('{"type": "user"}\n', encoding="utf-8")
-        with mock.patch.object(mc, "claude_orchestrator_transcript_path", return_value=expected_source):
+        with mock.patch.object(mc_runtime, "claude_orchestrator_transcript_path", return_value=expected_source):
             mc.capture_orchestrator_transcript("claude", self.repo, session_id, slice_artifact_dir)
         self.assertEqual(
             (slice_artifact_dir / "orchestrator-transcript.jsonl").read_text(encoding="utf-8"),
@@ -887,7 +907,7 @@ Continue later.
         slice_artifact_dir = Path(self.tmp.name) / "slice-001"
         slice_artifact_dir.mkdir()
         missing_source = Path(self.tmp.name) / "claude-project" / "missing.jsonl"
-        with mock.patch.object(mc, "claude_orchestrator_transcript_path", return_value=missing_source):
+        with mock.patch.object(mc_runtime, "claude_orchestrator_transcript_path", return_value=missing_source):
             mc.capture_orchestrator_transcript("claude", self.repo, "some-id", slice_artifact_dir)
         self.assertFalse((slice_artifact_dir / "orchestrator-transcript.jsonl").exists())
         note = (slice_artifact_dir / "orchestrator-transcript-note.txt").read_text(encoding="utf-8")

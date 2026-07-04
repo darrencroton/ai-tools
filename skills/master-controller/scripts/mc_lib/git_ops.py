@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import fnmatch
+import subprocess
+from pathlib import Path
+
+from .constants import FULL_COMMIT_RE
+from .models import CommandResult, McError
+from .process import run_command
+
+
+def git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise McError(message)
+    return result.stdout.strip()
+
+
+def git_result(repo: Path, *args: str) -> CommandResult:
+    return run_command(["git", "-C", str(repo), *args], allow_failure=True)
+
+
+def git_head(repo: Path) -> str | None:
+    result = git_result(repo, "rev-parse", "--verify", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git_status_text(repo: Path) -> str:
+    return git(repo, "status", "--short", "--untracked-files=all")
+
+
+def status_path(line: str) -> str:
+    path = line[3:] if len(line) > 3 else line
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1]
+    return path.strip().strip('"')
+
+
+def meaningful_status_lines(status_text: str) -> list[str]:
+    lines: list[str] = []
+    for line in status_text.splitlines():
+        path = status_path(line)
+        if path == ".ai-mc" or path.startswith(".ai-mc/"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def require_clean_worktree(repo: Path) -> None:
+    dirty = meaningful_status_lines(git_status_text(repo))
+    if dirty:
+        raise McError("starting git state is dirty outside .ai-mc/: " + "; ".join(dirty))
+
+
+def status_changed_files(status_text: str) -> set[str]:
+    return {status_path(line) for line in meaningful_status_lines(status_text)}
+
+
+def changed_files_between(repo: Path, before_head: str | None, after_head: str | None, after_status: str) -> set[str]:
+    files: set[str] = set()
+    if before_head and after_head and before_head != after_head:
+        files.update(git(repo, "diff", "--name-only", before_head, after_head).splitlines())
+    elif after_head and before_head is None:
+        files.update(git(repo, "show", "--name-only", "--format=", after_head).splitlines())
+    files.update(status_changed_files(after_status))
+    return {path for path in files if path}
+
+
+def write_git_diff(repo: Path, before_head: str | None, after_head: str | None, destination: Path) -> None:
+    if before_head and after_head and before_head != after_head:
+        result = git_result(repo, "diff", "--binary", before_head, after_head)
+    else:
+        result = git_result(repo, "diff", "--binary")
+    destination.write_text(result.stdout if result.returncode == 0 else result.stderr, encoding="utf-8")
+
+
+def is_full_commit_hash(value: str | None) -> bool:
+    return bool(value and FULL_COMMIT_RE.fullmatch(value))
+
+
+def commit_is_descendant(repo: Path, before_head: str | None, after_head: str | None) -> bool:
+    if not after_head:
+        return False
+    if not before_head:
+        return True
+    result = git_result(repo, "merge-base", "--is-ancestor", before_head, after_head)
+    return result.returncode == 0
+
+
+def normalize_authorized_entry(entry: str) -> str:
+    return entry.strip().strip("`").rstrip(".")
+
+
+def is_authorized_path(path: str, authorized_entries: list[str]) -> bool:
+    for raw_entry in authorized_entries:
+        entry = normalize_authorized_entry(raw_entry)
+        if entry.endswith("/"):
+            if path.startswith(entry):
+                return True
+        elif any(marker in entry for marker in ("*", "?", "[")):
+            if fnmatch.fnmatch(path, entry):
+                return True
+        elif path == entry:
+            return True
+    return False
+
+
+def unauthorized_files(changed_files: set[str], authorized_entries: list[str]) -> list[str]:
+    return sorted(path for path in changed_files if not is_authorized_path(path, authorized_entries))
+
+
+def resolve_repo(path: Path) -> Path:
+    repo = path.expanduser().resolve()
+    if not repo.exists():
+        raise McError(f"repo path does not exist: {repo}")
+    root = git(repo, "rev-parse", "--show-toplevel")
+    return Path(root).resolve()
+
+
+def resolve_plan(path: Path) -> Path:
+    plan = path.expanduser().resolve()
+    if not plan.is_file():
+        raise McError(f"plan file does not exist: {plan}")
+    return plan
+
+
+def git_access_path(repo: Path) -> Path:
+    return Path(git(repo, "rev-parse", "--absolute-git-dir")).resolve()
