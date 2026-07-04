@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib.util
 import json
 import os
 import platform
@@ -13,6 +14,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +78,8 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
             "Use --no-alt-screen for durable tmux captures.",
             "Worker-backed runs need sandbox network access.",
             "Commit-required runs need scoped write access to the repository git directory.",
+            "When used as a worker (not orchestrator), gets a per-slice CODEX_HOME seeded with a copy of the "
+            "real auth.json, since Codex's home dir doubles as its credential store.",
         ],
     },
     "claude": {
@@ -84,6 +88,11 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
             "Do not launch Claude workers from inside a Claude orchestrator.",
+            "As orchestrator, launched with --session-id so MC can capture the full JSONL transcript "
+            "as orchestrator-transcript.jsonl (pane capture alone loses detail behind Claude Code's "
+            "'ctrl+o to expand' collapsing).",
+            "When used as a worker (not orchestrator), gets a per-slice CLAUDE_CONFIG_DIR seeded with a "
+            "copy of the real .credentials.json, since Claude Code's home dir doubles as its credential store.",
         ],
     },
     "copilot": {
@@ -104,7 +113,21 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-SENSITIVE_ARTIFACT_NAMES = {"copilot-home"}
+SENSITIVE_ARTIFACT_NAMES = {"copilot-home", "codex-home", "claude-config-dir"}
+
+# Worker-tool home directories are not interchangeable: Copilot's real GitHub
+# credential lives outside ~/.copilot (gh CLI config / OS keychain), so
+# redirecting COPILOT_HOME to an isolated per-slice directory only needs a
+# writable dir. Codex's auth.json and Claude Code's .credentials.json live
+# directly inside their respective home directories, so isolating those homes
+# for a worker requires seeding the credential file first or the worker gets a
+# 401. Map each tool that needs seeding to (env var MC/the operator uses for
+# this tool's home, real home dirname fallback when the env var is unset,
+# credential filename to copy into the isolated per-slice home).
+WORKER_CREDENTIAL_HOMES: dict[str, tuple[str, str, str]] = {
+    "codex": ("CODEX_HOME", ".codex", "auth.json"),
+    "claude": ("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json"),
+}
 
 
 class McError(Exception):
@@ -170,10 +193,17 @@ class GateDecision:
 class TmuxHarnessAdapter:
     """Single tmux-backed harness adapter for the configured command."""
 
-    def __init__(self, harness_name: str, command_override: str | None = None, allow_unattended_default: bool = False):
+    def __init__(
+        self,
+        harness_name: str,
+        command_override: str | None = None,
+        allow_unattended_default: bool = False,
+        worker_tools: tuple[str, ...] = (),
+    ):
         self.harness_name = harness_name
         self.command_override = command_override
         self.allow_unattended_default = allow_unattended_default
+        self.worker_tools = worker_tools
         if command_override:
             self.command = command_override
         elif allow_unattended_default and harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
@@ -207,7 +237,7 @@ class TmuxHarnessAdapter:
             raise McError(f"harness command not found: {executable}")
 
     def build_shell_command(self, slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> str:
-        env = slice_environment(slice_artifact_dir, run_json, plan_path, plan_slice)
+        env = slice_environment(slice_artifact_dir, run_json, plan_path, plan_slice, self.harness_name, self.worker_tools)
         env_prefix = " ".join(
             f"{key}={shlex.quote(value)}"
             for key, value in env.items()
@@ -353,7 +383,13 @@ def harness_supports_role(harness_name: str, role: str) -> bool:
     return role in HARNESS_PROFILES.get(harness_name, {}).get("roles", [])
 
 
-def profile_command(harness_name: str, repo: Path, state: dict[str, Any], worker_tools: tuple[str, ...]) -> str:
+def profile_command(
+    harness_name: str,
+    repo: Path,
+    state: dict[str, Any],
+    worker_tools: tuple[str, ...],
+    orchestrator_session_id: str | None = None,
+) -> str:
     profile = HARNESS_PROFILES.get(harness_name)
     if not profile:
         raise McError(f"no MC harness profile is defined for {harness_name!r}")
@@ -371,14 +407,33 @@ def profile_command(harness_name: str, repo: Path, state: dict[str, Any], worker
             command.extend([profile["commit_git_access_flag"], str(git_access_path(repo))])
     elif worker_tools and harness_name not in {"claude"}:
         raise McError(f"harness profile {harness_name!r} has no tested worker-enabled launch path")
+    if harness_name == "claude" and orchestrator_session_id:
+        # Pins the session transcript to a deterministic path under
+        # ~/.claude/projects/<repo-slug>/<session_id>.jsonl so MC can capture
+        # it as a full-fidelity artifact after the run (see
+        # capture_orchestrator_transcript). Claude Code's interactive TUI
+        # collapses verbose tool output behind "ctrl+o to expand" in the tmux
+        # pane capture; this transcript is not subject to that collapsing.
+        command.extend(["--session-id", orchestrator_session_id])
     return shlex.join(command)
 
 
-def resolve_harness_command(args: argparse.Namespace, repo: Path, state: dict[str, Any]) -> str | None:
+def resolve_harness_command(
+    args: argparse.Namespace,
+    repo: Path,
+    state: dict[str, Any],
+    orchestrator_session_id: str | None = None,
+) -> str | None:
     if getattr(args, "harness_command", None):
         return args.harness_command
     if getattr(args, "allow_profile_command", False):
-        return profile_command(state["harness"]["name"], repo, state, parse_worker_tools(getattr(args, "worker_tools", None)))
+        return profile_command(
+            state["harness"]["name"],
+            repo,
+            state,
+            parse_worker_tools(getattr(args, "worker_tools", None)),
+            orchestrator_session_id,
+        )
     return None
 
 
@@ -595,8 +650,82 @@ def worker_jobs_path() -> Path:
     return skill_root().parent / "ai-orchestrator" / "scripts" / "worker_jobs.py"
 
 
+_WORKER_JOBS_MODULE: Any = None
+
+
+def worker_jobs_module() -> Any:
+    """Load ai-orchestrator's worker_jobs.py as a library module.
+
+    Reused (not reimplemented) here for its session-path conventions, e.g.
+    claude_project_root, which already correctly match how Claude Code and
+    Codex lay out their on-disk session transcripts for worker sessions.
+    """
+    global _WORKER_JOBS_MODULE
+    if _WORKER_JOBS_MODULE is None:
+        path = worker_jobs_path()
+        spec = importlib.util.spec_from_file_location("mc_worker_jobs", path)
+        if spec is None or spec.loader is None:
+            raise McError(f"could not load worker_jobs module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _WORKER_JOBS_MODULE = module
+    return _WORKER_JOBS_MODULE
+
+
+def claude_orchestrator_transcript_path(repo: Path, session_id: str) -> Path:
+    return worker_jobs_module().claude_project_root(repo.resolve()) / f"{session_id}.jsonl"
+
+
+def capture_orchestrator_transcript(harness_name: str, repo: Path, session_id: str | None, slice_artifact_dir: Path) -> None:
+    """Copy the orchestrator's own structured session transcript into the slice artifacts.
+
+    This is a full-fidelity complement to pane-capture.txt, not a replacement:
+    the tmux pane capture is still required to detect harness-level stuck/
+    blocked states (e.g. approval or trust prompts) and to support further
+    prompting mid-session; the JSONL transcript exists because Claude Code's
+    interactive TUI collapses verbose tool output behind "ctrl+o to expand"
+    in the pane, so exact commands/output are not always reconstructable from
+    pane-capture.txt alone.
+    """
+    if harness_name != "claude" or not session_id:
+        return
+    destination = slice_artifact_dir / "orchestrator-transcript.jsonl"
+    note_path = slice_artifact_dir / "orchestrator-transcript-note.txt"
+    try:
+        source = claude_orchestrator_transcript_path(repo, session_id)
+    except McError as exc:
+        note_path.write_text(f"orchestrator transcript lookup failed: {exc}\n", encoding="utf-8")
+        return
+    if source.exists():
+        shutil.copy2(source, destination)
+        note_path.unlink(missing_ok=True)
+    else:
+        note_path.write_text(
+            "orchestrator transcript not found at expected path: "
+            f"{source}\n"
+            "This can happen if the launched command did not honor --session-id "
+            "(e.g. a custom --harness-command without --session-id).\n",
+            encoding="utf-8",
+        )
+
+
 def git_access_path(repo: Path) -> Path:
     return Path(git(repo, "rev-parse", "--absolute-git-dir")).resolve()
+
+
+def real_tool_home(env_var: str, default_dirname: str) -> Path:
+    override = os.environ.get(env_var)
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / default_dirname
+
+
+def worker_credential_source(tool: str) -> tuple[Path, str] | None:
+    entry = WORKER_CREDENTIAL_HOMES.get(tool)
+    if not entry:
+        return None
+    env_var, default_dirname, filename = entry
+    return real_tool_home(env_var, default_dirname), filename
 
 
 def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
@@ -606,17 +735,48 @@ def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
         "tmp_dir": slice_artifact_dir / "tmp",
         "tool_home_root": slice_artifact_dir / "tool-homes",
         "copilot_home": slice_artifact_dir / "copilot-home",
+        "codex_home": slice_artifact_dir / "codex-home",
+        "claude_config_dir": slice_artifact_dir / "claude-config-dir",
     }
 
 
-def ensure_slice_runtime_dirs(slice_artifact_dir: Path) -> None:
-    for path in slice_paths(slice_artifact_dir).values():
-        path.mkdir(parents=True, exist_ok=True)
+def seed_worker_credentials(paths: dict[str, Path], worker_tools: tuple[str, ...], orchestrator_harness_name: str) -> list[str]:
+    warnings: list[str] = []
+    home_by_tool = {"codex": "codex_home", "claude": "claude_config_dir"}
+    for tool, home_key in home_by_tool.items():
+        if tool not in worker_tools or tool == orchestrator_harness_name:
+            continue
+        source = worker_credential_source(tool)
+        if source is None:
+            continue
+        source_dir, filename = source
+        source_path = source_dir / filename
+        destination = paths[home_key] / filename
+        if not source_path.exists():
+            warnings.append(f"{tool} worker credential source not found: {source_path}")
+            continue
+        shutil.copy2(source_path, destination)
+        os.chmod(destination, 0o600)
+    return warnings
 
 
-def slice_environment(slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> dict[str, str]:
+def ensure_slice_runtime_dirs(slice_artifact_dir: Path, worker_tools: tuple[str, ...] = (), orchestrator_harness_name: str = "") -> list[str]:
     paths = slice_paths(slice_artifact_dir)
-    return {
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return seed_worker_credentials(paths, worker_tools, orchestrator_harness_name)
+
+
+def slice_environment(
+    slice_artifact_dir: Path,
+    run_json: Path,
+    plan_path: Path,
+    plan_slice: PlanSlice,
+    orchestrator_harness_name: str = "",
+    worker_tools: tuple[str, ...] = (),
+) -> dict[str, str]:
+    paths = slice_paths(slice_artifact_dir)
+    env = {
         "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
         "COPILOT_HOME": str(paths["copilot_home"]),
         "MC_RESULT_SCHEMA_PATH": str(result_schema_path()),
@@ -630,6 +790,17 @@ def slice_environment(slice_artifact_dir: Path, run_json: Path, plan_path: Path,
         "MC_WORKER_JOBS_PATH": str(worker_jobs_path()),
         "TMPDIR": str(paths["tmp_dir"]),
     }
+    # Only redirect a tool's own home when that tool is a *worker* for this
+    # run, and never when it is also the orchestrator harness itself: codex
+    # and claude can both be orchestrators, and clobbering the orchestrator's
+    # own home/auth with an isolated (and possibly unseeded) per-slice
+    # directory would break the orchestrator, not just a worker. Copilot is
+    # never an MC orchestrator, so COPILOT_HOME above is always safe to set.
+    if "codex" in worker_tools and orchestrator_harness_name != "codex":
+        env["CODEX_HOME"] = str(paths["codex_home"])
+    if "claude" in worker_tools and orchestrator_harness_name != "claude":
+        env["CLAUDE_CONFIG_DIR"] = str(paths["claude_config_dir"])
+    return env
 
 
 def load_prompt_template() -> str:
@@ -660,6 +831,8 @@ def render_orchestrator_prompt(
         "slice_tmp_dir": str(paths["tmp_dir"]),
         "tool_home_root": str(paths["tool_home_root"]),
         "copilot_home": str(paths["copilot_home"]),
+        "codex_home": str(paths["codex_home"]),
+        "claude_config_dir": str(paths["claude_config_dir"]),
         "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
@@ -925,18 +1098,23 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         print(f"{plan_slice.slice_id} stopped: {exc}")
         return 2
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
-    ensure_slice_runtime_dirs(slice_artifact_dir)
-    prompt_path = slice_artifact_dir / "prompt.md"
+    harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
+    credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
+    for warning in credential_warnings:
+        print(f"warning: {warning}")
+    prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
         render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, configured_worker_tools),
         encoding="utf-8",
     )
 
+    orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
     adapter = TmuxHarnessAdapter(
-        state["harness"]["name"],
-        resolve_harness_command(args, repo, state),
+        harness_name,
+        resolve_harness_command(args, repo, state, orchestrator_session_id),
         getattr(args, "allow_unattended_default", False),
+        configured_worker_tools,
     )
     if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
         print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
@@ -1010,6 +1188,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 (slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt").read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
+            capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
             if timed_out:
                 adapter.request_stop(session_name)
                 time.sleep(min(float(args.poll_seconds), 1.0))
@@ -1031,6 +1210,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 last_gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
         except McError as exc:
             adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt")
+            capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
             adapter.force_stop(session_name)
             after_head = git_head(repo)
             after_status = git_status_text(repo)
@@ -1210,6 +1390,15 @@ def preflight(args: argparse.Namespace) -> int:
             check("codex worker network launch", False, "use --allow-profile-command or include sandbox workspace network access in --harness-command")
         else:
             check("worker-enabled launch", True, ", ".join(worker_tools))
+        for tool in worker_tools:
+            if tool == harness_name:
+                continue
+            source = worker_credential_source(tool)
+            if source is None:
+                continue
+            source_dir, filename = source
+            credential_path = source_dir / filename
+            check(f"{tool} worker credential source", credential_path.exists(), str(credential_path))
 
     if meaningful_status_lines(git_status_text(repo)):
         check("clean worktree", False, "dirty outside .ai-mc/")

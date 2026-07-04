@@ -698,6 +698,135 @@ Continue later.
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["stop_reason"], "test stop")
 
+    def test_seed_worker_credentials_copies_codex_auth_when_requested(self):
+        fake_codex_home = Path(self.tmp.name) / "fake-codex-home"
+        fake_codex_home.mkdir()
+        (fake_codex_home / "auth.json").write_text('{"token": "secret"}', encoding="utf-8")
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        paths = mc.slice_paths(slice_artifact_dir)
+        for path in paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
+            warnings = mc.seed_worker_credentials(paths, ("codex",), "claude")
+        self.assertEqual(warnings, [])
+        seeded = paths["codex_home"] / "auth.json"
+        self.assertEqual(seeded.read_text(encoding="utf-8"), '{"token": "secret"}')
+        self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
+
+    def test_seed_worker_credentials_skips_when_tool_is_orchestrator_itself(self):
+        fake_codex_home = Path(self.tmp.name) / "fake-codex-home"
+        fake_codex_home.mkdir()
+        (fake_codex_home / "auth.json").write_text('{"token": "secret"}', encoding="utf-8")
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        paths = mc.slice_paths(slice_artifact_dir)
+        for path in paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
+            warnings = mc.seed_worker_credentials(paths, ("codex",), "codex")
+        self.assertEqual(warnings, [])
+        self.assertFalse((paths["codex_home"] / "auth.json").exists())
+
+    def test_seed_worker_credentials_warns_when_source_missing(self):
+        fake_codex_home = Path(self.tmp.name) / "missing-codex-home"
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        paths = mc.slice_paths(slice_artifact_dir)
+        for path in paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
+            warnings = mc.seed_worker_credentials(paths, ("codex",), "claude")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("codex worker credential source not found", warnings[0])
+
+    def test_slice_environment_isolates_worker_home_but_not_orchestrators_own(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact_dir = Path("/tmp/artifacts")
+        run_json = Path("/tmp/run.json")
+        claude_orchestrator_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "claude", ("codex",))
+        self.assertEqual(claude_orchestrator_env["CODEX_HOME"], str(artifact_dir / "codex-home"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", claude_orchestrator_env)
+
+        codex_orchestrator_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("codex",))
+        self.assertNotIn("CODEX_HOME", codex_orchestrator_env)
+
+        no_worker_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice)
+        self.assertNotIn("CODEX_HOME", no_worker_env)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", no_worker_env)
+
+    def test_profile_command_claude_appends_session_id(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        command = mc.profile_command("claude", self.repo, state, (), "fixed-session-id")
+        self.assertIn("--session-id fixed-session-id", command)
+
+    def test_capture_orchestrator_transcript_copies_existing_session_file(self):
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        slice_artifact_dir.mkdir()
+        session_id = "abc-123"
+        expected_source = Path(self.tmp.name) / "claude-project" / f"{session_id}.jsonl"
+        expected_source.parent.mkdir(parents=True)
+        expected_source.write_text('{"type": "user"}\n', encoding="utf-8")
+        with mock.patch.object(mc, "claude_orchestrator_transcript_path", return_value=expected_source):
+            mc.capture_orchestrator_transcript("claude", self.repo, session_id, slice_artifact_dir)
+        self.assertEqual(
+            (slice_artifact_dir / "orchestrator-transcript.jsonl").read_text(encoding="utf-8"),
+            '{"type": "user"}\n',
+        )
+        self.assertFalse((slice_artifact_dir / "orchestrator-transcript-note.txt").exists())
+
+    def test_capture_orchestrator_transcript_notes_when_session_file_missing(self):
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        slice_artifact_dir.mkdir()
+        missing_source = Path(self.tmp.name) / "claude-project" / "missing.jsonl"
+        with mock.patch.object(mc, "claude_orchestrator_transcript_path", return_value=missing_source):
+            mc.capture_orchestrator_transcript("claude", self.repo, "some-id", slice_artifact_dir)
+        self.assertFalse((slice_artifact_dir / "orchestrator-transcript.jsonl").exists())
+        note = (slice_artifact_dir / "orchestrator-transcript-note.txt").read_text(encoding="utf-8")
+        self.assertIn("orchestrator transcript not found", note)
+
+    def test_capture_orchestrator_transcript_noop_for_non_claude_harness(self):
+        slice_artifact_dir = Path(self.tmp.name) / "slice-001"
+        slice_artifact_dir.mkdir()
+        mc.capture_orchestrator_transcript("codex", self.repo, "some-id", slice_artifact_dir)
+        self.assertFalse((slice_artifact_dir / "orchestrator-transcript.jsonl").exists())
+        self.assertFalse((slice_artifact_dir / "orchestrator-transcript-note.txt").exists())
+
+    def test_preflight_checks_worker_credential_source(self):
+        self.prepare_committed_repo()
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="claude", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        missing_codex_home = Path(self.tmp.name) / "missing-codex-home"
+        preflight_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=None,
+            worker_tools="codex",
+            allow_profile_command=True,
+        )
+        output = io.StringIO()
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(missing_codex_home)}):
+            with contextlib.redirect_stdout(output):
+                result = mc.preflight(preflight_args)
+        self.assertEqual(result, 2)
+        self.assertIn("codex worker credential source", output.getvalue())
+
+    def test_preflight_skips_credential_check_when_worker_tool_is_orchestrator(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        missing_codex_home = Path(self.tmp.name) / "missing-codex-home"
+        preflight_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=None,
+            worker_tools="codex",
+            allow_profile_command=True,
+        )
+        output = io.StringIO()
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(missing_codex_home)}):
+            with contextlib.redirect_stdout(output):
+                mc.preflight(preflight_args)
+        self.assertNotIn("codex worker credential source", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,11 +16,14 @@ Worker artifact root: {worker_artifact_root}
 Slice temp directory: {slice_tmp_dir}
 Tool home root: {tool_home_root}
 Copilot home: {copilot_home}
+Codex home: {codex_home}
+Claude config dir: {claude_config_dir}
 Required worker tool(s) for this run: {worker_tools}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
 The `Required worker tool(s) for this run` line above is authoritative for which worker tool(s) to use. If the plan's validation-plan prose names a different or additional tool (for example, wording carried over from a previous test run with a different harness/worker combination), use the tool(s) configured for this run instead, and note the discrepancy in `worker-evidence.md`. If it says "none configured for this run", only launch a worker if the plan explicitly requires one, and use your own judgement for an appropriate tool.
+MC has already exported and, for any worker tool listed above that needs it, seeded the per-slice home directories above (`COPILOT_HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) in this session's environment. Do not set, unset, or redirect these yourself, and do not invent your own isolated home directory for a worker. If a worker fails with an authentication error, that is a blocker to report (with the exact error) in `worker-evidence.md` or `orchestrator-result.json`, not something to work around by clearing or redirecting these variables or falling back to unscoped credentials.
 Commit creation is authorized only for this selected slice after validation, drift audit, and code review pass. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, or perform destructive actions unless the frozen plan explicitly authorizes that action.
 
 Frozen contract:
@@ -51,7 +54,7 @@ Required workflow:
 
 Worker helper sequence:
 - If you use an external AI worker, launch it through the worker helper so MC gets durable artifacts.
-- MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}`, `MC_SLICE_TMP_DIR={slice_tmp_dir}`, `MC_TOOL_HOME_ROOT={tool_home_root}`, `TMPDIR={slice_tmp_dir}`, and `COPILOT_HOME={copilot_home}` for this slice.
+- MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}`, `MC_SLICE_TMP_DIR={slice_tmp_dir}`, `MC_TOOL_HOME_ROOT={tool_home_root}`, `TMPDIR={slice_tmp_dir}`, `COPILOT_HOME={copilot_home}` for this slice, and, for any of `codex`/`claude` listed as a required worker tool above, `CODEX_HOME={codex_home}` / `CLAUDE_CONFIG_DIR={claude_config_dir}` seeded with the credentials that tool needs.
 - Create one worker run directory before starting workers:
 
     `run_dir="$(python3 {worker_jobs_path} init --prefix workers)"`

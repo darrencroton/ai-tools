@@ -339,7 +339,13 @@ def infer_project_dirs(command: list[str], tool: str) -> list[Path]:
 
 
 def claude_project_root(project_dir: Path) -> Path:
-    normalized = str(project_dir).replace(os.sep, "-")
+    # Claude Code's own project-slug algorithm replaces every
+    # non-alphanumeric character (not just the path separator) with "-", e.g.
+    # "/Users/x/Documents/AI Tools/mc-test" -> "-Users-x-Documents-AI-Tools-
+    # mc-test". Verified against a real session's recorded cwd; replacing
+    # only os.sep silently missed any project path containing a space, dot,
+    # or other separator and made session lookups fail for such paths.
+    normalized = re.sub(r"[^A-Za-z0-9]", "-", str(project_dir))
     return Path.home() / ".claude" / "projects" / normalized
 
 
