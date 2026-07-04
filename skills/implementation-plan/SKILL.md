@@ -14,12 +14,39 @@ Create a plan that makes each agent loop narrow, boring, and auditable. The outp
 ## Workflow
 
 1. Inspect the codebase enough to understand the requested change and the relevant conventions.
-2. Define the smallest useful acceptance slice. If the request has multiple concerns, split it into ordered slices.
-3. For each slice, freeze the contract before proposing implementation detail.
-4. Identify risky surfaces: auth, billing, permissions, persistence, database schema, migrations, shared types, API contracts, routing, global state, concurrency, generated files, public CLI flags, or release/deployment config.
-5. If a slice touches a risky surface, mark it as requiring explicit approval or split it until the risk is isolated.
-6. Define validation before coding: tests to add/update, targeted checks to run, and behaviours that must not regress.
-7. End with a copyable implementation prompt for the next chat.
+2. Identify the likely implementation model/profile if the user supplied one. If not supplied, default to conservative atomic slices but include batching guidance for stronger models when adjacent slices can safely share one review.
+3. Define the smallest useful acceptance slices. If the request has multiple concerns, split it into ordered slices, but do not split purely mechanical setup/docs/runtime work so finely that the plan becomes harder to execute than the change.
+4. Group adjacent slices into optional implementation batches when a stronger model could reasonably implement them together under one drift audit and code review. Never group slices that cross an approval-needed gate, mix unrelated risky surfaces, or would make rollback unclear.
+5. For each slice, freeze the contract before proposing implementation detail.
+6. Identify risky surfaces: auth, billing, permissions, persistence, database schema, migrations, shared types, API contracts, routing, global state, concurrency, generated files, public CLI flags, or release/deployment config.
+7. If a slice touches a risky surface, mark it as requiring explicit approval or split it until the risk is isolated.
+8. Define validation before coding: tests to add/update, targeted checks to run, and behaviours that must not regress.
+9. End with a copyable implementation prompt for the next chat.
+
+## Slice Granularity
+
+Choose slice size based on risk, coupling, rollback, and expected implementer strength.
+
+- **Frontier model / senior human profile**: prefer one to three substantial slices for a coherent feature when the change is internally coupled, low-to-medium risk, and can be reviewed with one clear diff per slice. Use optional batches so the implementer can run multiple atomic contracts together when that improves coherence.
+- **Standard strong model profile**: prefer smaller slices with one main runtime concern per slice and explicit validation after each. Keep batching optional, not required.
+- **Weaker or less trusted model profile**: prefer narrower atomic slices, more checkpoints, and less cross-file autonomy.
+
+Do not create extra slices just to separate every file or every documentation step. Split when a boundary improves authorization, reviewability, rollback, or human approval, not because smaller is automatically better.
+
+When useful, include a short `Implementation Profiles` section before the slice receipts:
+
+```md
+## Implementation Profiles
+
+- Recommended for frontier/senior implementer: run Batch A, then Batch B.
+- Recommended for standard implementer: run slices individually unless the implementer explicitly confirms the batch contract.
+- Recommended for weaker implementer: run atomic slices one at a time.
+
+## Slice Batches
+
+- Batch A: Slices 1-2 — <why these can share one implementation/review loop>
+- Batch B: Slices 3-4 — <why these can share one implementation/review loop>
+```
 
 ## Planning Receipt
 
@@ -82,26 +109,26 @@ Both modes keep two non-negotiables: a slice whose Risk Flags mark approval-need
 
 ```md
 Plan file: <path>
-Slices this session: <e.g. Slice 2 — or Slices 2–3 only if tightly coupled>
+Slices or batch this session: <e.g. Slice 2, Slices 2–3, or Batch A>
 
-Read the full plan file first. If a selected slice receipt is incomplete or the plan state is unclear, stop and tell me before coding.
+Read the full plan file first. If a selected slice or batch receipt is incomplete or the plan state is unclear, stop and tell me before coding.
 
 Work on the current feature branch for this plan; if none exists, create one and tell me the name.
 
 Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily hostile drift-audit, independent code-review, and long-running tests.
 
-For each selected slice, in plan order:
+For each selected slice or batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals) from the plan.
-2. If the slice's Risk Flags mark approval-needed, stop and get my approval before coding.
-3. Apply scoped-implementation against the slice contract.
+2. If any included slice's Risk Flags mark approval-needed, stop and get my approval before coding.
+3. Apply scoped-implementation against the selected contract.
 4. Apply drift-audit. Report the authorization gate result before any quality review.
 5. If the gate passes, apply code-review. If it fails, fix the drift and re-audit.
 6. Surface drift and review findings to me, fix them, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
-7. Ask me before committing. On my approval, commit that slice with the commit skill.
+7. Ask me before committing. On my approval, commit the selected slice or batch with the commit skill.
 
-After the selected slice(s) are committed, use handoff to record state and the next slice to resume from. Do not continue past the selected slice(s).
+After the selected slice(s) or batch are committed, use handoff to record state and the next slice or batch to resume from. Do not continue past the selected scope.
 
-Confirm before starting: plan file read, selected slice(s), branch, and the first slice.
+Confirm before starting: plan file read, selected slice(s) or batch, branch, and the first slice.
 ```
 
 ### Mode B — Autonomous full-loop driver
@@ -116,16 +143,16 @@ Act as the orchestrator per the ai-orchestrator skill. You own the full run — 
 
 Setup: create a new branch for this run, switch to it, and report the name.
 
-For each slice, in plan order:
+For each slice or approved batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals).
-2. If the slice's Risk Flags mark approval-needed, STOP the run and report — do not self-approve a slice the plan gated for a human.
-3. Apply scoped-implementation against the slice contract.
+2. If any included slice's Risk Flags mark approval-needed, STOP the run and report — do not self-approve a slice the plan gated for a human.
+3. Apply scoped-implementation against the selected contract.
 4. Apply drift-audit (delegate a hostile audit). Record the authorization gate result.
 5. If the gate fails, fix the drift inside the contract and re-audit. If it can't be fixed inside the contract, STOP and report.
 6. On a passing gate, apply code-review (delegate for independence). Fix findings, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
 7. When the slice passes validation, drift-audit, and code-review, commit it with the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
 
-Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, write a handoff with current state and the next slice to resume.
+Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, write a handoff with current state and the next slice or batch to resume.
 
 When all slices are complete, write a final summary: slices committed, gate results per slice, and anything left for me to assess.
 
