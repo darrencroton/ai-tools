@@ -316,6 +316,30 @@ Continue later.
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
         self.assertTrue(command.endswith("python fake.py"))
 
+    def test_codex_unattended_default_uses_no_alt_screen(self):
+        adapter = mc.TmuxHarnessAdapter("codex", None, allow_unattended_default=True)
+        self.assertEqual(adapter.command, "codex --no-alt-screen -s workspace-write -a never")
+
+    def test_codex_readiness_wait_blocks_on_trust_prompt(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, "Do you trust the contents of this directory?", ""),
+        ]
+        with mock.patch.object(mc, "run_command", side_effect=calls), mock.patch.object(mc.time, "sleep"):
+            with self.assertRaisesRegex(mc.McError, "trust prompt"):
+                adapter.wait_until_prompt_ready("session")
+
+    def test_codex_readiness_wait_accepts_ready_composer(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, "OpenAI Codex\n\n› Summarize recent commits", ""),
+        ]
+        with mock.patch.object(mc, "run_command", side_effect=calls), mock.patch.object(mc.time, "sleep") as sleep:
+            adapter.wait_until_prompt_ready("session")
+        sleep.assert_called()
+
     def test_adapter_detect_activity_reports_pane_changes(self):
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
         calls = [

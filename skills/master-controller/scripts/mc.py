@@ -55,13 +55,14 @@ DEFAULT_POLL_SECONDS = 2.0
 # classifier-driven mode (its only approval policies are untrusted /
 # on-failure / on-request / never), so `-a never` is paired with
 # `-s workspace-write` (not `danger-full-access`) to keep its OS-level
-# filesystem/network sandbox as the backstop instead. Either way, this still
+# filesystem/network sandbox as the backstop instead. `--no-alt-screen` keeps
+# the tmux pane capture useful for MC artifacts and debugging. Either way, this still
 # shifts part of the enforced safety boundary from "the harness asks before
 # acting" to "MC verifies after the fact" (drift-audit, code-review,
 # unauthorized-file checks) plus, for claude, its own classifier -- that must
 # stay an explicit, visible per-run choice, never a silent default.
 KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
-    "codex": "codex -s workspace-write -a never",
+    "codex": "codex --no-alt-screen -s workspace-write -a never",
     "claude": "claude --permission-mode auto",
 }
 
@@ -194,8 +195,28 @@ class TmuxHarnessAdapter:
             error_prefix="tmux start failed",
         )
 
+    def wait_until_prompt_ready(self, session_name: str) -> None:
+        command_parts = shlex.split(self.command) if self.command.strip() else []
+        executable = Path(command_parts[0]).name if command_parts else ""
+        if executable != "codex":
+            return
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if not self.session_exists(session_name):
+                raise McError("codex session exited before the prompt could be sent")
+            result = run_command(["tmux", "capture-pane", "-p", "-S", "-200", "-t", session_name], allow_failure=True)
+            capture = result.stdout if result.returncode == 0 else ""
+            if "Do you trust the contents of this directory" in capture:
+                raise McError("codex directory trust prompt blocked unattended launch; trust the repo before running MC")
+            if "OpenAI Codex" in capture and "›" in capture:
+                time.sleep(0.5)
+                return
+            time.sleep(0.25)
+        raise McError("codex TUI did not become ready for prompt injection")
+
     def send_prompt(self, session_name: str, prompt_path: Path) -> None:
         buffer_name = f"{session_name}_prompt"
+        self.wait_until_prompt_ready(session_name)
         run_command(["tmux", "load-buffer", "-b", buffer_name, str(prompt_path)], error_prefix="tmux prompt load failed")
         run_command(["tmux", "paste-buffer", "-b", buffer_name, "-t", session_name], error_prefix="tmux prompt paste failed")
         run_command(["tmux", "delete-buffer", "-b", buffer_name], allow_failure=True)
