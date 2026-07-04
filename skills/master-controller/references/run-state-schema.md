@@ -51,6 +51,7 @@ Allowed run `status` values:
 
 - `initialized`
 - `running`
+- `partial`
 - `needs-human`
 - `blocked`
 - `failed`
@@ -92,7 +93,7 @@ Runtime slices append entries to `slices`:
 
 Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
-Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
 MC sets these environment variables for every slice harness:
 
@@ -108,6 +109,8 @@ MC sets these environment variables for every slice harness:
 - `TMPDIR`
 - `MC_TOOL_HOME_ROOT`
 - `COPILOT_HOME`
+- `CODEX_HOME` when Codex is a required worker and not the orchestrator
+- `CLAUDE_CONFIG_DIR` when Claude is a required worker and not the orchestrator
 
 ## `orchestrator-result.json`
 
@@ -154,3 +157,5 @@ Allowed orchestrator `status` values:
 - `blocked`
 
 MC verifies this result against git state, artifacts, validation output, drift audit, code review, and commit state before accepting a slice.
+
+When all authorization, validation, drift, review, changed-file, ancestry, and clean-worktree evidence passes but `commit.hash` is wrong or abbreviated, MC may reconcile that evidence field to the proven current `HEAD`, write `mc-reconciliation.json` / `mc-reconciliation.md`, update `orchestrator-result.json`, and accept the slice. This reconciliation is limited to commit-hash evidence; it must not mask unauthorized files, missing validation, failed audits/reviews, dirty worktrees, or missing commits.

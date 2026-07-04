@@ -24,6 +24,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 PARSER_NAME = "implementation-plan-markdown-v1"
+FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_SECTIONS = (
     "Intended Change",
     "Acceptance Criteria",
@@ -85,8 +86,10 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     "claude": {
         "roles": ["orchestrator", "senior-worker"],
         "base_command": ["claude", "--permission-mode", "auto"],
+        "model_flag": "--model",
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
+            "Optional MC profile model override is composed with --model while preserving --session-id transcript capture.",
             "Do not launch Claude workers from inside a Claude orchestrator.",
             "As orchestrator, launched with --session-id so MC can capture the full JSONL transcript "
             "as orchestrator-transcript.jsonl (pane capture alone loses detail behind Claude Code's "
@@ -389,6 +392,7 @@ def profile_command(
     state: dict[str, Any],
     worker_tools: tuple[str, ...],
     orchestrator_session_id: str | None = None,
+    harness_model: str | None = None,
 ) -> str:
     profile = HARNESS_PROFILES.get(harness_name)
     if not profile:
@@ -399,6 +403,12 @@ def profile_command(
     command = list(profile.get("base_command") or [])
     if not command:
         raise McError(f"harness profile {harness_name!r} has no base command")
+
+    if harness_model:
+        model_flag = profile.get("model_flag")
+        if not model_flag:
+            raise McError(f"harness profile {harness_name!r} does not support MC-composed model overrides")
+        command.extend([model_flag, harness_model])
 
     if harness_name == "codex":
         if worker_tools:
@@ -424,6 +434,8 @@ def resolve_harness_command(
     state: dict[str, Any],
     orchestrator_session_id: str | None = None,
 ) -> str | None:
+    if getattr(args, "harness_model", None) and not getattr(args, "allow_profile_command", False):
+        raise McError("--harness-model is only supported with --allow-profile-command")
     if getattr(args, "harness_command", None):
         return args.harness_command
     if getattr(args, "allow_profile_command", False):
@@ -433,6 +445,7 @@ def resolve_harness_command(
             state,
             parse_worker_tools(getattr(args, "worker_tools", None)),
             orchestrator_session_id,
+            getattr(args, "harness_model", None),
         )
     return None
 
@@ -489,6 +502,49 @@ def write_git_diff(repo: Path, before_head: str | None, after_head: str | None, 
     else:
         result = git_result(repo, "diff", "--binary")
     destination.write_text(result.stdout if result.returncode == 0 else result.stderr, encoding="utf-8")
+
+
+def is_full_commit_hash(value: str | None) -> bool:
+    return bool(value and FULL_COMMIT_RE.fullmatch(value))
+
+
+def commit_is_descendant(repo: Path, before_head: str | None, after_head: str | None) -> bool:
+    if not after_head:
+        return False
+    if not before_head:
+        return True
+    result = git_result(repo, "merge-base", "--is-ancestor", before_head, after_head)
+    return result.returncode == 0
+
+
+def write_reconciliation_artifact(
+    slice_artifact_dir: Path,
+    *,
+    field: str,
+    reported_value: str,
+    corrected_value: str,
+    reason: str,
+) -> None:
+    payload = {
+        "field": field,
+        "reported_value": reported_value,
+        "corrected_value": corrected_value,
+        "reason": reason,
+        "reconciled_at": utc_now(),
+    }
+    (slice_artifact_dir / "mc-reconciliation.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (slice_artifact_dir / "mc-reconciliation.md").write_text(
+        "# MC Reconciliation\n\n"
+        f"- Field: `{field}`\n"
+        f"- Reported value: `{reported_value}`\n"
+        f"- Corrected value: `{corrected_value}`\n"
+        f"- Reason: {reason}\n",
+        encoding="utf-8",
+    )
+
+
+def write_orchestrator_result(path: Path, result: dict[str, Any]) -> None:
+    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def normalize_authorized_entry(entry: str) -> str:
@@ -885,6 +941,32 @@ def artifact_exists(repo: Path, slice_artifact_dir: Path, result: dict[str, Any]
     return any((base / candidate).exists() for base in (slice_artifact_dir, repo))
 
 
+def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
+    worker_root = slice_artifact_dir / "worker-runs"
+    if not worker_root.exists():
+        return
+    runs: list[dict[str, Any]] = []
+    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir()):
+        run_entry: dict[str, Any] = {"run_dir": str(run_dir), "workers": []}
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                run_entry["manifest"] = manifest
+            except json.JSONDecodeError as exc:
+                run_entry["manifest_error"] = str(exc)
+        for status_path_obj in sorted(run_dir.glob("*-status.json")):
+            try:
+                status = json.loads(status_path_obj.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                status = {"path": str(status_path_obj), "error": str(exc)}
+            run_entry["workers"].append(status)
+        runs.append(run_entry)
+    if not runs:
+        return
+    (slice_artifact_dir / "worker-runs-summary.json").write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def object_field(result: dict[str, Any], field: str) -> dict[str, Any]:
     value = result.get(field)
     return value if isinstance(value, dict) else {}
@@ -955,11 +1037,58 @@ def verify_gate(
     if state.get("policy", {}).get("commit_required", True):
         if not commit.get("requested") or not commit.get("created") or not commit.get("hash"):
             return GateDecision("fail", "required commit was not created", result, tuple(sorted(actual_changed)))
-        commit_hash = git(repo, "rev-parse", str(commit["hash"]))
-        if after_head != commit_hash:
-            return GateDecision("fail", "reported commit is not the current HEAD", result, tuple(sorted(actual_changed)))
         if meaningful_status_lines(after_status):
             return GateDecision("fail", "post-commit worktree is dirty outside .ai-mc/", result, tuple(sorted(actual_changed)))
+        if not after_head or after_head == before_head:
+            return GateDecision("fail", "required commit did not advance HEAD", result, tuple(sorted(actual_changed)))
+        reported_hash = str(commit["hash"])
+        if reported_hash != after_head:
+            if not commit_is_descendant(repo, before_head, after_head):
+                return GateDecision("fail", "current HEAD is not descended from the slice starting commit", result, tuple(sorted(actual_changed)))
+            reason = (
+                "orchestrator reported an incorrect commit hash, but MC proved the slice commit from local git "
+                "evidence and corrected orchestrator-result.json"
+            )
+            result.setdefault("reconciliations", []).append(
+                {
+                    "field": "commit.hash",
+                    "reported_value": reported_hash,
+                    "corrected_value": after_head,
+                    "reason": reason,
+                    "reconciled_at": utc_now(),
+                }
+            )
+            result["commit"]["hash"] = after_head
+            write_orchestrator_result(result_path, result)
+            write_reconciliation_artifact(
+                slice_artifact_dir,
+                field="commit.hash",
+                reported_value=reported_hash,
+                corrected_value=after_head,
+                reason=reason,
+            )
+            return GateDecision("pass", "all gates passed; corrected reported commit hash to current HEAD", result, tuple(sorted(actual_changed)))
+        if not is_full_commit_hash(reported_hash):
+            reason = "orchestrator reported an abbreviated commit hash; MC corrected it to the full current HEAD"
+            result.setdefault("reconciliations", []).append(
+                {
+                    "field": "commit.hash",
+                    "reported_value": reported_hash,
+                    "corrected_value": after_head,
+                    "reason": reason,
+                    "reconciled_at": utc_now(),
+                }
+            )
+            result["commit"]["hash"] = after_head
+            write_orchestrator_result(result_path, result)
+            write_reconciliation_artifact(
+                slice_artifact_dir,
+                field="commit.hash",
+                reported_value=reported_hash,
+                corrected_value=after_head,
+                reason=reason,
+            )
+            return GateDecision("pass", "all gates passed; expanded reported commit hash to full current HEAD", result, tuple(sorted(actual_changed)))
 
     return GateDecision("pass", "all gates passed", result, tuple(sorted(actual_changed)))
 
@@ -1046,12 +1175,16 @@ def init_run(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     state = load_run(resolve_run_path(repo, args.run))
+    harness = state.get("harness", {})
     print(f"Run: {state['run_id']}")
     print(f"Status: {state['status']}")
     print(f"Repo: {state['repo_path']}")
     print(f"Plan: {state['plan_path']}")
     print(f"Branch: {state['branch']}")
-    print(f"Harness: {state['harness']['name']}")
+    harness_line = str(harness.get("name", "unknown"))
+    if harness.get("model_requested"):
+        harness_line += f" (requested model: {harness['model_requested']})"
+    print(f"Harness: {harness_line}")
     print(f"Completed slices: {len(completed_slice_ids(state))}/{state['plan']['slice_count']}")
     if state.get("stop_reason"):
         print(f"Stop reason: {state['stop_reason']}")
@@ -1064,6 +1197,11 @@ def summarize(args: argparse.Namespace) -> int:
     completed = completed_slice_ids(state)
     print(f"MC run {state['run_id']} summary")
     print(f"Status: {state['status']}")
+    if state["status"] == "partial":
+        slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+        candidate = next_slice(slices, state)
+        if candidate:
+            print(f"Next slice: {candidate.slice_id} - {candidate.title}")
     if not state.get("slices"):
         print("No slices have run yet.")
     else:
@@ -1078,6 +1216,10 @@ def update_state_for_stop(run_json: Path, state: dict[str, Any], status_value: s
     state["stop_reason"] = reason
     state["current_slice"] = None
     write_run(run_json, state)
+
+
+def idle_status_after_pass(state: dict[str, Any]) -> str:
+    return "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "partial"
 
 
 def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_dir: Path) -> int:
@@ -1100,6 +1242,10 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
     harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
+    harness_model = getattr(args, "harness_model", None)
+    if harness_model:
+        state.setdefault("harness", {})["model_requested"] = harness_model
+        write_run(run_json, state)
     credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
     for warning in credential_warnings:
         print(f"warning: {warning}")
@@ -1189,6 +1335,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 encoding="utf-8",
             )
             capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
+            capture_worker_runs_summary(slice_artifact_dir)
             if timed_out:
                 adapter.request_stop(session_name)
                 time.sleep(min(float(args.poll_seconds), 1.0))
@@ -1211,6 +1358,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         except McError as exc:
             adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt")
             capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
+            capture_worker_runs_summary(slice_artifact_dir)
             adapter.force_stop(session_name)
             after_head = git_head(repo)
             after_status = git_status_text(repo)
@@ -1225,7 +1373,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         state["slices"].append(entry)
         state["current_slice"] = None
         if last_gate.status == "pass":
-            state["status"] = "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "initialized"
+            state["status"] = idle_status_after_pass(state)
             state["stop_reason"] = None
             write_run(run_json, state)
             print(f"{plan_slice.slice_id} passed MC gates.")
@@ -1295,6 +1443,75 @@ def run_remaining(args: argparse.Namespace) -> int:
             return code
 
 
+def plan_slice_by_id(slices: list[PlanSlice], slice_id: str) -> PlanSlice | None:
+    for plan_slice in slices:
+        if plan_slice.slice_id == slice_id:
+            return plan_slice
+    return None
+
+
+def previous_completed_head(state: dict[str, Any], slice_id: str) -> str | None:
+    previous: str | None = None
+    for entry in state.get("slices", []):
+        if entry.get("slice_id") == slice_id:
+            return previous
+        if str(entry.get("status", "")).lower() in COMPLETED_SLICE_STATUSES:
+            commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+            if commit.get("hash"):
+                previous = str(commit["hash"])
+    return previous
+
+
+def reconcile(args: argparse.Namespace) -> int:
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    run_json = run_dir / "run.json"
+    state = load_run(run_dir)
+    if not state.get("slices"):
+        raise McError("run has no slice entries to reconcile")
+    entry_index = len(state["slices"]) - 1
+    entry = state["slices"][entry_index]
+    if str(entry.get("status", "")).lower() in COMPLETED_SLICE_STATUSES:
+        print(f"{entry.get('slice_id', 'unknown')} is already complete.")
+        return 0
+    slice_id = str(entry.get("slice_id", ""))
+    slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+    plan_slice = plan_slice_by_id(slices, slice_id)
+    if plan_slice is None:
+        raise McError(f"failed slice is not in the plan: {slice_id}")
+    artifact_dir_value = entry.get("artifact_dir")
+    if not artifact_dir_value:
+        raise McError(f"failed slice has no artifact_dir: {slice_id}")
+    artifact_dir = Path(artifact_dir_value)
+    if not artifact_dir.is_absolute():
+        artifact_dir = repo / artifact_dir
+    before_head = previous_completed_head(state, slice_id)
+    if before_head is None:
+        parent = git_result(repo, "rev-parse", "HEAD^")
+        before_head = parent.stdout.strip() if parent.returncode == 0 else None
+    after_head = git_head(repo)
+    after_status = git_status_text(repo)
+    capture_worker_runs_summary(artifact_dir)
+    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status)
+    reconciled_entry = slice_entry_from_gate(repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate)
+    state["slices"][entry_index] = reconciled_entry
+    state["current_slice"] = None
+    if gate.status == "pass":
+        state["status"] = idle_status_after_pass(state)
+        state["stop_reason"] = None
+        write_run(run_json, state)
+        print(f"{slice_id} reconciled and accepted: {gate.reason}")
+        return 0
+    status_value = "failed" if gate.status == "fail" else gate.status
+    if status_value not in RUN_STOP_STATUSES:
+        status_value = "blocked"
+    state["status"] = status_value
+    state["stop_reason"] = gate.reason
+    write_run(run_json, state)
+    print(f"{slice_id} remains stopped: {gate.reason}")
+    return 2
+
+
 def stop(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
@@ -1349,9 +1566,11 @@ def preflight(args: argparse.Namespace) -> int:
 
     harness_name = state["harness"]["name"]
     executable = shlex.split(getattr(args, "harness_command", "") or harness_name)[0]
+    if getattr(args, "harness_model", None) and not getattr(args, "allow_profile_command", False):
+        check("harness model composition", False, "--harness-model requires --allow-profile-command")
     if getattr(args, "allow_profile_command", False):
         try:
-            command = profile_command(harness_name, repo, state, parse_worker_tools(args.worker_tools))
+            command = profile_command(harness_name, repo, state, parse_worker_tools(args.worker_tools), harness_model=getattr(args, "harness_model", None))
             executable = shlex.split(command)[0]
             check("profile command", True, command)
         except McError as exc:
@@ -1481,6 +1700,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--repo", default=".", help="target git repository")
     preflight_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
     preflight_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    preflight_parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
     preflight_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
     preflight_parser.add_argument(
         "--allow-profile-command",
@@ -1496,6 +1716,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_next_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for orchestrator result")
     run_next_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
     run_next_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    run_next_parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
     run_next_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
     run_next_parser.add_argument(
         "--allow-profile-command",
@@ -1516,6 +1737,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for each orchestrator result")
     run_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
     run_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    run_parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
     run_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
     run_parser.add_argument(
         "--allow-profile-command",
@@ -1529,11 +1751,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(func=run_remaining, dry_run=False)
 
+    reconcile_parser = subparsers.add_parser("reconcile", help="re-check and repair a stopped slice from local evidence")
+    reconcile_parser.add_argument("--repo", default=".", help="target git repository")
+    reconcile_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
+    reconcile_parser.set_defaults(func=reconcile)
+
     stop_parser = subparsers.add_parser("stop", help="cancel the current MC run")
     stop_parser.add_argument("--repo", default=".", help="target git repository")
     stop_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
     stop_parser.add_argument("--reason", default="cancelled by user", help="reason recorded in run state")
     stop_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    stop_parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
     stop_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
     stop_parser.add_argument(
         "--allow-profile-command",

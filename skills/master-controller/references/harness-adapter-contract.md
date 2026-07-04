@@ -47,6 +47,8 @@ MC keeps one capability profile per tool, not one profile per role combination. 
 
 This keeps tool-specific instructions together while avoiding many partially tested combinations. For example, the Codex profile adds sandbox network access only when worker tools are requested, and adds scoped git-directory access only when commits are required.
 
+Profile composition also owns supported model overrides. For example, a Claude run that requests a specific model must be composed by MC as `claude --permission-mode auto --model <model> --session-id <generated-id>` so model selection does not bypass transcript capture or other profile-managed launch requirements.
+
 ## Failure Semantics
 
 Adapters return structured failure reasons instead of raising opaque process errors when possible:

@@ -352,6 +352,26 @@ Continue later.
         self.assertIn("--add-dir", command)
         self.assertIn(str(mc.git_access_path(self.repo)), command)
 
+    def test_claude_profile_command_composes_model_and_session_id(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        command = mc.profile_command("claude", self.repo, state, ("codex",), "fixed-session-id", "sonnet")
+        parts = shlex.split(command)
+        self.assertEqual(parts, ["claude", "--permission-mode", "auto", "--model", "sonnet", "--session-id", "fixed-session-id"])
+
+    def test_unsupported_profile_model_override_fails_closed(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        with self.assertRaisesRegex(mc.McError, "does not support"):
+            mc.profile_command("codex", self.repo, state, (), harness_model="some-model")
+
+    def test_harness_model_requires_profile_command(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        args = argparse.Namespace(harness_command=None, allow_profile_command=False, worker_tools="", harness_model="sonnet")
+        with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
+            mc.resolve_harness_command(args, self.repo, state)
+
     def test_copilot_profile_cannot_be_orchestrator(self):
         self.prepare_committed_repo()
         state = self.init_run()
@@ -551,6 +571,95 @@ Continue later.
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "pass")
 
+    def test_gate_reconciles_fabricated_commit_hash_when_local_evidence_is_clear(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        self.assertTrue(after.startswith(git(self.repo, "rev-parse", "--short", "HEAD")))
+        fabricated = git(self.repo, "rev-parse", "--short", "HEAD") + "0" * 33
+        self.assertNotEqual(fabricated, after)
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=fabricated)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "pass")
+        self.assertIn("corrected reported commit hash", decision.reason)
+        result = json.loads((artifact / "orchestrator-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["commit"]["hash"], after)
+        self.assertTrue((artifact / "mc-reconciliation.json").exists())
+
+    def test_gate_blocks_commit_hash_reconciliation_when_head_did_not_advance(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=[], commit_hash="0" * 40)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("did not advance HEAD", decision.reason)
+
+    def test_capture_worker_runs_summary_records_status_files(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "01-codex-check-status.json").write_text(
+            json.dumps({"label": "01-codex-check", "state": "completed", "returncode": 0}),
+            encoding="utf-8",
+        )
+
+        mc.capture_worker_runs_summary(artifact)
+
+        summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["runs"][0]["workers"][0]["label"], "01-codex-check")
+
+    def test_reconcile_repairs_failed_slice_after_commit_hash_evidence_mismatch(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash="0" * 40)
+        state["slices"].append(
+            {
+                "slice_id": "Slice 1",
+                "title": "First Slice",
+                "status": "fail",
+                "started_at": "2026-01-01T00:00:00Z",
+                "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+                "changed_files": ["README.md"],
+                "validation": [{"command": "test", "result": "pass", "notes": ""}],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": True, "created": True, "hash": "0" * 40},
+                "next_action": "",
+                "blockers": [],
+                "gate_reason": "reported commit is not the current HEAD",
+            }
+        )
+        state["status"] = "failed"
+        state["stop_reason"] = "reported commit is not the current HEAD"
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.reconcile(args), 0)
+
+        repaired = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(repaired["slices"][0]["status"], "pass")
+        self.assertEqual(repaired["slices"][0]["commit"]["hash"], after)
+        self.assertEqual(repaired["status"], "partial")
+
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_next_executes_toy_harness_and_records_pass(self):
         self.prepare_committed_repo()
@@ -570,6 +679,7 @@ Continue later.
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mc.run_next(run_args), 0)
         state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "partial")
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
         self.assertTrue(((self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "pane-capture.txt").exists())

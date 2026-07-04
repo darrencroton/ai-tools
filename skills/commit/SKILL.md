@@ -25,5 +25,6 @@ EOF
 )"
 ```
 
-4. Run `git status` to confirm success
-5. Never use `--no-verify` and never amend — if a hook fails, fix the issue and create a new commit
+4. Run `git rev-parse HEAD` immediately after a successful commit and record/copy the exact 40-character hash from that command when any workflow asks for the commit hash. Do not infer a full hash from abbreviated `git commit` output.
+5. Run `git status` to confirm success
+6. Never use `--no-verify` and never amend — if a hook fails, fix the issue and create a new commit

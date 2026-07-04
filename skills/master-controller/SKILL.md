@@ -83,12 +83,18 @@ python3 skills/master-controller/scripts/mc.py status --repo <path>
 python3 skills/master-controller/scripts/mc.py summarize --repo <path>
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --dry-run
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py run-next --repo <path> --harness-model <model> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py reconcile --repo <path>
 python3 skills/master-controller/scripts/mc.py stop --repo <path> --reason <reason>
 python3 skills/master-controller/scripts/mc.py archive-sensitive --repo <path> --dry-run
 ```
 
-Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails.
+Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails and cannot be safely reconciled from local evidence.
+
+When all other slice gates pass and the only defect is an incorrect or abbreviated reported `commit.hash`, MC may correct `orchestrator-result.json` to the proven current `HEAD`, write `mc-reconciliation.json` / `mc-reconciliation.md`, and accept the slice. This recovery is allowed only when local git evidence proves the commit advanced from the slice starting point, changed files match the authorized surface and reported result, validation/drift/review artifacts pass, and the post-commit worktree is clean.
+
+For a run that already stopped on a recoverable evidence problem, use `reconcile` to re-run MC's local gates against the stopped slice and update run state only when the same strict reconciliation criteria pass.
 
 ## References
 
