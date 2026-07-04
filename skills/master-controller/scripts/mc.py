@@ -66,6 +66,46 @@ KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
     "claude": "claude --permission-mode auto",
 }
 
+HARNESS_PROFILES: dict[str, dict[str, Any]] = {
+    "codex": {
+        "roles": ["orchestrator", "senior-worker"],
+        "base_command": ["codex", "--no-alt-screen", "-s", "workspace-write", "-a", "never"],
+        "worker_network_flag": ["-c", "sandbox_workspace_write.network_access=true"],
+        "commit_git_access_flag": "--add-dir",
+        "notes": [
+            "Use --no-alt-screen for durable tmux captures.",
+            "Worker-backed runs need sandbox network access.",
+            "Commit-required runs need scoped write access to the repository git directory.",
+        ],
+    },
+    "claude": {
+        "roles": ["orchestrator", "senior-worker"],
+        "base_command": ["claude", "--permission-mode", "auto"],
+        "notes": [
+            "Uses Claude Code's permission classifier for unattended routine actions.",
+            "Do not launch Claude workers from inside a Claude orchestrator.",
+        ],
+    },
+    "copilot": {
+        "roles": ["junior-worker"],
+        "base_command": ["copilot"],
+        "notes": [
+            "Copilot is a worker profile only; it is not an MC orchestrator harness.",
+            "Use a per-slice COPILOT_HOME for sandboxed session state.",
+        ],
+    },
+    "opencode": {
+        "roles": ["pending"],
+        "base_command": ["opencode"],
+        "notes": [
+            "Profile placeholder for future validation.",
+            "Do not use as an MC harness until an unattended prompt, permission, and capture contract has been tested.",
+        ],
+    },
+}
+
+SENSITIVE_ARTIFACT_NAMES = {"copilot-home"}
+
 
 class McError(Exception):
     """User-facing MC error."""
@@ -167,16 +207,10 @@ class TmuxHarnessAdapter:
             raise McError(f"harness command not found: {executable}")
 
     def build_shell_command(self, slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> str:
+        env = slice_environment(slice_artifact_dir, run_json, plan_path, plan_slice)
         env_prefix = " ".join(
             f"{key}={shlex.quote(value)}"
-            for key, value in {
-                "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(slice_artifact_dir / "worker-runs"),
-                "COPILOT_HOME": str(slice_artifact_dir / "copilot-home"),
-                "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
-                "MC_RUN_JSON_PATH": str(run_json),
-                "MC_PLAN_PATH": str(plan_path),
-                "MC_SLICE_ID": plan_slice.slice_id,
-            }.items()
+            for key, value in env.items()
         )
         return f"{env_prefix} {self.command}"
 
@@ -307,6 +341,45 @@ def run_command(command: list[str], *, error_prefix: str = "command failed", all
 
 def git_result(repo: Path, *args: str) -> CommandResult:
     return run_command(["git", "-C", str(repo), *args], allow_failure=True)
+
+
+def parse_worker_tools(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(tool.strip().lower() for tool in value.split(",") if tool.strip())
+
+
+def harness_supports_role(harness_name: str, role: str) -> bool:
+    return role in HARNESS_PROFILES.get(harness_name, {}).get("roles", [])
+
+
+def profile_command(harness_name: str, repo: Path, state: dict[str, Any], worker_tools: tuple[str, ...]) -> str:
+    profile = HARNESS_PROFILES.get(harness_name)
+    if not profile:
+        raise McError(f"no MC harness profile is defined for {harness_name!r}")
+    if not harness_supports_role(harness_name, "orchestrator"):
+        raise McError(f"harness profile {harness_name!r} is not approved for the orchestrator role")
+
+    command = list(profile.get("base_command") or [])
+    if not command:
+        raise McError(f"harness profile {harness_name!r} has no base command")
+
+    if harness_name == "codex":
+        if worker_tools:
+            command.extend(profile["worker_network_flag"])
+        if state.get("policy", {}).get("commit_required", True):
+            command.extend([profile["commit_git_access_flag"], str(git_access_path(repo))])
+    elif worker_tools and harness_name not in {"claude"}:
+        raise McError(f"harness profile {harness_name!r} has no tested worker-enabled launch path")
+    return shlex.join(command)
+
+
+def resolve_harness_command(args: argparse.Namespace, repo: Path, state: dict[str, Any]) -> str | None:
+    if getattr(args, "harness_command", None):
+        return args.harness_command
+    if getattr(args, "allow_profile_command", False):
+        return profile_command(state["harness"]["name"], repo, state, parse_worker_tools(getattr(args, "worker_tools", None)))
+    return None
 
 
 def git_head(repo: Path) -> str | None:
@@ -514,6 +587,51 @@ def skill_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def result_schema_path() -> Path:
+    return skill_root() / "references" / "run-state-schema.md"
+
+
+def worker_jobs_path() -> Path:
+    return skill_root().parent / "ai-orchestrator" / "scripts" / "worker_jobs.py"
+
+
+def git_access_path(repo: Path) -> Path:
+    return Path(git(repo, "rev-parse", "--absolute-git-dir")).resolve()
+
+
+def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
+    return {
+        "artifact_dir": slice_artifact_dir,
+        "worker_artifact_root": slice_artifact_dir / "worker-runs",
+        "tmp_dir": slice_artifact_dir / "tmp",
+        "tool_home_root": slice_artifact_dir / "tool-homes",
+        "copilot_home": slice_artifact_dir / "copilot-home",
+    }
+
+
+def ensure_slice_runtime_dirs(slice_artifact_dir: Path) -> None:
+    for path in slice_paths(slice_artifact_dir).values():
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def slice_environment(slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> dict[str, str]:
+    paths = slice_paths(slice_artifact_dir)
+    return {
+        "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
+        "COPILOT_HOME": str(paths["copilot_home"]),
+        "MC_RESULT_SCHEMA_PATH": str(result_schema_path()),
+        "MC_RUN_JSON_PATH": str(run_json),
+        "MC_PLAN_PATH": str(plan_path),
+        "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
+        "MC_SLICE_ID": plan_slice.slice_id,
+        "MC_SLICE_TMP_DIR": str(paths["tmp_dir"]),
+        "MC_TOOL_HOME_ROOT": str(paths["tool_home_root"]),
+        "MC_WORKER_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
+        "MC_WORKER_JOBS_PATH": str(worker_jobs_path()),
+        "TMPDIR": str(paths["tmp_dir"]),
+    }
+
+
 def load_prompt_template() -> str:
     path = skill_root() / "references" / "orchestrator-prompt.md"
     text = path.read_text(encoding="utf-8")
@@ -523,20 +641,19 @@ def load_prompt_template() -> str:
     return match.group("template")
 
 
-def worker_jobs_path() -> Path:
-    return skill_root().parent / "ai-orchestrator" / "scripts" / "worker_jobs.py"
-
-
 def render_orchestrator_prompt(state: dict[str, Any], plan_slice: PlanSlice, slice_artifact_dir: Path, run_json: Path) -> str:
     template = load_prompt_template()
+    paths = slice_paths(slice_artifact_dir)
     values = {
         "plan_path": state["plan_path"],
         "run_json_path": str(run_json),
         "slice_artifact_dir": str(slice_artifact_dir),
-        "result_schema_path": str(skill_root() / "references" / "run-state-schema.md"),
+        "result_schema_path": str(result_schema_path()),
         "worker_jobs_path": str(worker_jobs_path()),
-        "worker_artifact_root": str(slice_artifact_dir / "worker-runs"),
-        "copilot_home": str(slice_artifact_dir / "copilot-home"),
+        "worker_artifact_root": str(paths["worker_artifact_root"]),
+        "slice_tmp_dir": str(paths["tmp_dir"]),
+        "tool_home_root": str(paths["tool_home_root"]),
+        "copilot_home": str(paths["copilot_home"]),
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
         "intended_change": plan_slice.sections.get("Intended Change", ""),
@@ -801,15 +918,17 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         print(f"{plan_slice.slice_id} stopped: {exc}")
         return 2
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
-    slice_artifact_dir.mkdir(parents=True, exist_ok=True)
+    ensure_slice_runtime_dirs(slice_artifact_dir)
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json), encoding="utf-8")
 
     adapter = TmuxHarnessAdapter(
         state["harness"]["name"],
-        getattr(args, "harness_command", None),
+        resolve_harness_command(args, repo, state),
         getattr(args, "allow_unattended_default", False),
     )
+    if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
+        print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
     if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
         print(
             f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
@@ -846,12 +965,16 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             timed_out = False
             previous_capture = ""
             activity_log = slice_artifact_dir / f"activity-attempt-{attempt}.jsonl"
+            live_capture_path = slice_artifact_dir / f"pane-capture-live-attempt-{attempt}.txt"
             while True:
                 # Always record at least one activity snapshot before deciding,
                 # even if the result already landed: audit evidence should not
                 # depend on winning a race against a fast-finishing harness.
                 activity = adapter.detect_activity(session_name, previous_capture)
                 previous_capture = str(activity.get("capture", ""))
+                if previous_capture:
+                    live_capture_path.write_text(previous_capture, encoding="utf-8")
+                    (slice_artifact_dir / "pane-capture-live-latest.txt").write_text(previous_capture, encoding="utf-8")
                 with activity_log.open("a", encoding="utf-8") as handle:
                     handle.write(
                         json.dumps(
@@ -990,7 +1113,7 @@ def stop(args: argparse.Namespace) -> int:
     if session_name:
         adapter = TmuxHarnessAdapter(
             state["harness"]["name"],
-            getattr(args, "harness_command", None),
+            resolve_harness_command(args, repo, state),
             getattr(args, "allow_unattended_default", False),
         )
         adapter.request_stop(str(session_name))
@@ -999,6 +1122,136 @@ def stop(args: argparse.Namespace) -> int:
     update_state_for_stop(run_dir / "run.json", state, "cancelled", args.reason)
     print(f"Run cancelled: {args.reason}")
     return 0
+
+
+def print_check(label: str, ok: bool, detail: str = "") -> None:
+    status_value = "PASS" if ok else "FAIL"
+    suffix = f" - {detail}" if detail else ""
+    print(f"{status_value}: {label}{suffix}")
+
+
+def list_profiles(args: argparse.Namespace) -> int:
+    for name, profile in sorted(HARNESS_PROFILES.items()):
+        print(f"{name}")
+        print(f"  roles: {', '.join(profile.get('roles', []))}")
+        base = profile.get("base_command") or []
+        print(f"  base_command: {shlex.join(base)}")
+        for note in profile.get("notes", []):
+            print(f"  - {note}")
+    return 0
+
+
+def preflight(args: argparse.Namespace) -> int:
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    state = load_run(run_dir)
+    errors: list[str] = []
+
+    def check(label: str, ok: bool, detail: str = "") -> None:
+        print_check(label, ok, detail)
+        if not ok:
+            errors.append(label if not detail else f"{label}: {detail}")
+
+    check("target repo", repo.exists(), str(repo))
+    check("git worktree", git_result(repo, "rev-parse", "--is-inside-work-tree").returncode == 0)
+    check("tmux available", shutil.which("tmux") is not None, shutil.which("tmux") or "not found")
+
+    harness_name = state["harness"]["name"]
+    executable = shlex.split(getattr(args, "harness_command", "") or harness_name)[0]
+    if getattr(args, "allow_profile_command", False):
+        try:
+            command = profile_command(harness_name, repo, state, parse_worker_tools(args.worker_tools))
+            executable = shlex.split(command)[0]
+            check("profile command", True, command)
+        except McError as exc:
+            check("profile command", False, str(exc))
+    check("harness executable", shutil.which(executable) is not None, f"{executable}: {shutil.which(executable) or 'not found'}")
+    check("harness orchestrator role", harness_supports_role(harness_name, "orchestrator"), harness_name)
+
+    plan_path = resolve_plan(Path(state["plan_path"]))
+    check("plan file", plan_path.exists(), str(plan_path))
+    slices = parse_plan(plan_path)
+    candidate = next_slice(slices, state)
+    check("remaining slice", candidate is not None, candidate.slice_id if candidate else "none")
+    if candidate:
+        runnable, reasons = eligibility(candidate)
+        check("slice eligibility", runnable, "; ".join(reasons) if reasons else candidate.title)
+        proposed_artifact_dir = run_dir / "slices" / slice_dir_name(candidate)
+        check("run directory writable", os.access(run_dir, os.W_OK), str(run_dir))
+        check("worker helper", worker_jobs_path().exists(), str(worker_jobs_path()))
+        check("result schema", result_schema_path().exists(), str(result_schema_path()))
+        for label, path in slice_paths(proposed_artifact_dir).items():
+            parent = nearest_existing_parent(path)
+            check(f"{label} parent writable", os.access(parent, os.W_OK), str(path))
+
+    if state.get("policy", {}).get("commit_required", True):
+        try:
+            git_dir = git_access_path(repo)
+            check("git directory writable", os.access(git_dir, os.W_OK), str(git_dir))
+        except McError as exc:
+            check("git directory writable", False, str(exc))
+
+    worker_tools = parse_worker_tools(args.worker_tools)
+    if worker_tools:
+        unsupported = [tool for tool in worker_tools if tool not in HARNESS_PROFILES]
+        check("worker profiles known", not unsupported, ", ".join(unsupported) if unsupported else ", ".join(worker_tools))
+        if harness_name == "codex" and not (getattr(args, "allow_profile_command", False) or "sandbox_workspace_write.network_access=true" in (args.harness_command or "")):
+            check("codex worker network launch", False, "use --allow-profile-command or include sandbox workspace network access in --harness-command")
+        else:
+            check("worker-enabled launch", True, ", ".join(worker_tools))
+
+    if meaningful_status_lines(git_status_text(repo)):
+        check("clean worktree", False, "dirty outside .ai-mc/")
+    else:
+        check("clean worktree", True)
+
+    if errors:
+        print("Preflight failed.")
+        return 2
+    print("Preflight passed.")
+    return 0
+
+
+def sensitive_artifact_dirs(run_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    slices_dir = run_dir / "slices"
+    if not slices_dir.exists():
+        return paths
+    for path in slices_dir.glob("slice-*/*"):
+        if path.is_dir() and path.name in SENSITIVE_ARTIFACT_NAMES:
+            paths.append(path)
+    return sorted(paths)
+
+
+def archive_sensitive(args: argparse.Namespace) -> int:
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    targets = sensitive_artifact_dirs(run_dir)
+    if not targets:
+        print("No sensitive worker artifact directories found.")
+        return 0
+    archive_root = repo / ".ai-mc" / "sensitive-archive" / run_dir.name
+    for source in targets:
+        relative = source.relative_to(run_dir)
+        destination = archive_root / relative
+        print(f"{source} -> {destination}")
+        if args.dry_run:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise McError(f"archive destination already exists: {destination}")
+        shutil.move(str(source), str(destination))
+        marker = source.parent / f"{source.name}-ARCHIVED.txt"
+        marker.write_text(f"Sensitive worker state archived to {destination}\n", encoding="utf-8")
+    print("Dry run complete." if args.dry_run else "Sensitive worker artifacts archived.")
+    return 0
+
+
+def nearest_existing_parent(path: Path) -> Path:
+    current = path if path.exists() else path.parent
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1021,6 +1274,21 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
         command.set_defaults(func=func)
 
+    profiles_parser = subparsers.add_parser("profiles", help="list MC harness and worker capability profiles")
+    profiles_parser.set_defaults(func=list_profiles)
+
+    preflight_parser = subparsers.add_parser("preflight", help="check the next MC slice launch before running it")
+    preflight_parser.add_argument("--repo", default=".", help="target git repository")
+    preflight_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
+    preflight_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    preflight_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
+    preflight_parser.add_argument(
+        "--allow-profile-command",
+        action="store_true",
+        help="use MC's capability profile to compose the unattended harness command from run requirements",
+    )
+    preflight_parser.set_defaults(func=preflight)
+
     run_next_parser = subparsers.add_parser("run-next", help="inspect the next slice")
     run_next_parser.add_argument("--repo", default=".", help="target git repository")
     run_next_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
@@ -1028,6 +1296,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_next_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for orchestrator result")
     run_next_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
     run_next_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    run_next_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
+    run_next_parser.add_argument(
+        "--allow-profile-command",
+        action="store_true",
+        help="use MC's capability profile to compose the unattended harness command from run requirements",
+    )
     run_next_parser.add_argument(
         "--allow-unattended-default",
         action="store_true",
@@ -1042,6 +1316,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for each orchestrator result")
     run_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
     run_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    run_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
+    run_parser.add_argument(
+        "--allow-profile-command",
+        action="store_true",
+        help="use MC's capability profile to compose the unattended harness command from run requirements",
+    )
     run_parser.add_argument(
         "--allow-unattended-default",
         action="store_true",
@@ -1054,12 +1334,24 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
     stop_parser.add_argument("--reason", default="cancelled by user", help="reason recorded in run state")
     stop_parser.add_argument("--harness-command", help="override harness command for controlled local validation")
+    stop_parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
+    stop_parser.add_argument(
+        "--allow-profile-command",
+        action="store_true",
+        help="use MC's capability profile to compose the unattended harness command from run requirements",
+    )
     stop_parser.add_argument(
         "--allow-unattended-default",
         action="store_true",
         help="opt in to a known unattended-safe launch command for --harness codex/claude (disables per-action approval; MC's post-hoc gates become the safety boundary)",
     )
     stop_parser.set_defaults(func=stop)
+
+    archive_parser = subparsers.add_parser("archive-sensitive", help="archive sensitive worker state from a run")
+    archive_parser.add_argument("--repo", default=".", help="target git repository")
+    archive_parser.add_argument("--run", default="current", help="run directory, run.json path, or 'current'")
+    archive_parser.add_argument("--dry-run", action="store_true", help="print artifact moves without changing files")
+    archive_parser.set_defaults(func=archive_sensitive)
 
     return parser
 

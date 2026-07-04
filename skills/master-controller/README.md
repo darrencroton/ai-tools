@@ -44,6 +44,21 @@ python3 skills/master-controller/scripts/mc.py status --repo /path/to/repo
 python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 ```
 
+List harness and worker capability profiles:
+
+```bash
+python3 skills/master-controller/scripts/mc.py profiles
+```
+
+Preflight the next slice before starting a tmux harness:
+
+```bash
+python3 skills/master-controller/scripts/mc.py preflight \
+  --repo /path/to/repo \
+  --worker-tools copilot \
+  --allow-profile-command
+```
+
 Preview the next runnable slice:
 
 ```bash
@@ -53,13 +68,20 @@ python3 skills/master-controller/scripts/mc.py run-next --repo /path/to/repo --d
 Run the next eligible slice:
 
 ```bash
-python3 skills/master-controller/scripts/mc.py run-next --repo /path/to/repo
+python3 skills/master-controller/scripts/mc.py run-next \
+  --repo /path/to/repo \
+  --worker-tools copilot \
+  --allow-profile-command
 ```
 
 Run eligible slices until all are complete or a stop condition is reached:
 
 ```bash
-python3 skills/master-controller/scripts/mc.py run --repo /path/to/repo --scope remaining
+python3 skills/master-controller/scripts/mc.py run \
+  --repo /path/to/repo \
+  --scope remaining \
+  --worker-tools copilot \
+  --allow-profile-command
 ```
 
 Cancel a run and record the reason:
@@ -68,7 +90,39 @@ Cancel a run and record the reason:
 python3 skills/master-controller/scripts/mc.py stop --repo /path/to/repo --reason "manual stop"
 ```
 
+Archive sensitive worker state from a completed or stopped run:
+
+```bash
+python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to/repo --dry-run
+python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to/repo
+```
+
 `run-next --dry-run` exits successfully only when the next uncompleted slice has the required sections, has a non-empty authorized file surface, and is not approval-gated. Runtime execution also requires a clean target worktree outside `.ai-mc/`.
+
+## Default MC Execution Flow
+
+When a user provides a complete implementation plan and asks MC to implement it, the MC should not need a bespoke launch prompt. Use this sequence unless the user specifies a different scope or harness:
+
+1. Resolve the target repo, plan path, branch, harness, and worker tools from the user request and plan. Default harness is `codex`; worker tools are omitted unless the plan or user requires them.
+2. Initialize a run with `init` if needed, or reuse `.ai-mc/current` only after checking it points at the same repo and plan.
+3. Run `preflight --allow-profile-command`, adding `--worker-tools <tool[,tool]>` when workers are required.
+4. Run `run-next --dry-run` to verify the next eligible slice and authorized files.
+5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan.
+6. Run `summarize`, inspect `run.json`, inspect slice artifacts, and check git status before reporting.
+
+Do not ask users to hand-compose Codex or Claude sandbox flags. Use `profiles`, `preflight`, `--worker-tools`, and `--allow-profile-command` so MC chooses the tested launch path from tool capabilities plus run requirements.
+
+## Profiles and Launch Requirements
+
+MC stores one profile per tool instead of one profile per possible role combination. Tool profiles describe stable capabilities and constraints: Codex and Claude can be orchestrators or senior workers, Copilot is a junior worker, and OpenCode is a placeholder until its unattended harness contract is tested.
+
+At runtime, MC composes the launch command from the selected harness plus explicit requirements:
+
+- `--worker-tools copilot` tells MC the slice will use a Copilot worker and the harness needs worker-compatible setup.
+- `--allow-profile-command` tells MC to use the tested profile command instead of requiring a hand-written `--harness-command`.
+- `commit_required=true` in run policy tells the Codex profile to add scoped git-directory access for local commits.
+
+This avoids a large matrix of incomplete names such as `codex-copilot-commit`. The role information stays with each tool profile, and the slice requirements are visible on the command line.
 
 ## Run State
 
@@ -85,18 +139,26 @@ State is stored under the target repository:
           prompt.md
           activity-attempt-1.jsonl
           pane-capture.txt
+          pane-capture-live-latest.txt
+          worker-runs/
+          tmp/
+          tool-homes/
+          copilot-home/
           git-status-before.txt
           git-status-after.txt
           git-diff.patch
           validation-summary.md
           drift-audit.md
           code-review.md
+          worker-evidence.md
           orchestrator-result.json
 ```
 
 Target projects should usually add `.ai-mc/` to their own `.gitignore`, but MC does not edit `.gitignore` as part of initialization.
 
-Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check.
+Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit.
+
+Worker state and temporary files should stay under the slice artifact directory. MC exports fixed paths for worker runs, temporary files, and tool-specific home directories so orchestrators do not have to invent locations.
 
 ## Plan Eligibility
 

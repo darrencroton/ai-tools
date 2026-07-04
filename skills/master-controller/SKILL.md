@@ -33,6 +33,19 @@ Docker and container setup are out of scope. MC may run inside a container or on
 
 The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries.
 
+## Default Operating Path
+
+When the user gives MC a complete implementation plan and asks to implement it, do not require them to restate the whole launch recipe. Use this default path unless they specify a different scope, harness, or worker set:
+
+1. Use `codex` as the default orchestrator harness when no harness is specified.
+2. Initialize an MC run if `.ai-mc/current` is missing or is for a different plan; otherwise reuse the current run after checking status.
+3. Run `preflight` before the first slice. Include `--worker-tools <tool[,tool]>` when the plan or user requires workers, and include `--allow-profile-command` for normal local execution.
+4. Run `run-next --dry-run` and confirm the selected slice is eligible.
+5. If the user requested one slice, run `run-next`. If the user requested the plan or all remaining work, run `run --scope remaining`.
+6. After the run stops or completes, run `summarize`, inspect `run.json`, inspect the selected slice artifact directories, and check git status before reporting.
+
+Ask the user only when required information cannot be inferred safely, such as the target repo, plan path, intended branch, whether to run one slice or all remaining slices, or whether an approval-gated slice should proceed. Do not ask the user to hand-compose harness sandbox flags; use MC profiles and preflight instead.
+
 ## Safety Rules
 
 MC must stop on:
@@ -64,12 +77,15 @@ MC decisions must not rely only on natural-language transcript interpretation. T
 
 ```bash
 python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name>
+python3 skills/master-controller/scripts/mc.py profiles
+python3 skills/master-controller/scripts/mc.py preflight --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py status --repo <path>
 python3 skills/master-controller/scripts/mc.py summarize --repo <path>
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --dry-run
-python3 skills/master-controller/scripts/mc.py run-next --repo <path>
-python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining
+python3 skills/master-controller/scripts/mc.py run-next --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py stop --repo <path> --reason <reason>
+python3 skills/master-controller/scripts/mc.py archive-sensitive --repo <path> --dry-run
 ```
 
 Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails.

@@ -311,9 +311,12 @@ Continue later.
         self.assertIn(str(mc.skill_root() / "references" / "run-state-schema.md"), prompt)
         self.assertIn(str(mc.worker_jobs_path()), prompt)
         self.assertIn(str(slice_artifact_dir / "worker-runs"), prompt)
+        self.assertIn(str(slice_artifact_dir / "tmp"), prompt)
+        self.assertIn(str(slice_artifact_dir / "tool-homes"), prompt)
         self.assertIn(str(slice_artifact_dir / "copilot-home"), prompt)
         self.assertIn('run_dir="$(python3 ', prompt)
         self.assertIn('start --run-dir "$run_dir"', prompt)
+        self.assertIn("worker-evidence.md", prompt)
 
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
@@ -321,9 +324,29 @@ Continue later.
         command = adapter.build_shell_command(Path("/tmp/artifacts"), Path("/tmp/run.json"), self.plan, plan_slice)
         self.assertIn("AI_ORCHESTRATOR_ARTIFACT_ROOT=/tmp/artifacts/worker-runs", command)
         self.assertIn("COPILOT_HOME=/tmp/artifacts/copilot-home", command)
+        self.assertIn("MC_RESULT_SCHEMA_PATH=", command)
         self.assertIn("MC_SLICE_ARTIFACT_DIR=/tmp/artifacts", command)
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
+        self.assertIn("MC_SLICE_TMP_DIR=/tmp/artifacts/tmp", command)
+        self.assertIn("MC_TOOL_HOME_ROOT=/tmp/artifacts/tool-homes", command)
+        self.assertIn("MC_WORKER_JOBS_PATH=", command)
+        self.assertIn("TMPDIR=/tmp/artifacts/tmp", command)
         self.assertTrue(command.endswith("python fake.py"))
+
+    def test_codex_profile_command_composes_worker_and_commit_requirements(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        command = mc.profile_command("codex", self.repo, state, ("copilot",))
+        self.assertIn("codex --no-alt-screen -s workspace-write -a never", command)
+        self.assertIn("sandbox_workspace_write.network_access=true", command)
+        self.assertIn("--add-dir", command)
+        self.assertIn(str(mc.git_access_path(self.repo)), command)
+
+    def test_copilot_profile_cannot_be_orchestrator(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        with self.assertRaisesRegex(mc.McError, "not approved for the orchestrator role"):
+            mc.profile_command("copilot", self.repo, state, ())
 
     def test_codex_unattended_default_uses_no_alt_screen(self):
         adapter = mc.TmuxHarnessAdapter("codex", None, allow_unattended_default=True)
@@ -540,6 +563,7 @@ Continue later.
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
         self.assertTrue(((self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "pane-capture.txt").exists())
+        self.assertTrue(((self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "pane-capture-live-latest.txt").exists())
         activity_path = (self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "activity-attempt-1.jsonl"
         self.assertTrue(activity_path.exists())
         activity = json.loads(activity_path.read_text(encoding="utf-8").splitlines()[0])
@@ -638,6 +662,22 @@ Continue later.
         stopped = json.loads(run_json.read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "needs-human")
         self.assertIn("approval", stopped["stop_reason"])
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for preflight test")
+    def test_preflight_passes_with_explicit_harness_command(self):
+        self.prepare_committed_repo()
+        self.init_run()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=sys.executable,
+            worker_tools="",
+            allow_profile_command=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(mc.preflight(args), 0)
+        self.assertIn("Preflight passed.", output.getvalue())
 
     def test_stop_records_cancelled_state(self):
         self.init_run()

@@ -32,10 +32,20 @@ For each slice, the adapter must allow MC to capture:
 - Every slice starts in a fresh tmux session.
 - Session names must include the run id and slice id.
 - The working directory must be the target repo/worktree.
-- The harness receives `MC_SLICE_ARTIFACT_DIR`, `MC_RUN_JSON_PATH`, `MC_PLAN_PATH`, and `MC_SLICE_ID` in its environment.
+- The harness receives fixed MC environment variables for the slice: `MC_SLICE_ARTIFACT_DIR`, `MC_RUN_JSON_PATH`, `MC_PLAN_PATH`, `MC_SLICE_ID`, `MC_RESULT_SCHEMA_PATH`, `MC_WORKER_JOBS_PATH`, `MC_WORKER_ARTIFACT_ROOT`, `AI_ORCHESTRATOR_ARTIFACT_ROOT`, `MC_SLICE_TMP_DIR`, `TMPDIR`, `MC_TOOL_HOME_ROOT`, and `COPILOT_HOME`.
 - MC records activity checks as JSON lines with `checked_at`, `running`, and `active` fields.
-- MC must be able to capture pane output before and after stop.
+- MC must preserve live pane output while polling and must also attempt a final capture before and after stop.
 - MC must close the session after completion or timeout.
+
+## Harness Profiles
+
+MC keeps one capability profile per tool, not one profile per role combination. The launch command is composed from:
+
+- the selected orchestrator harness, for example `codex` or `claude`;
+- runtime requirements, such as worker tools being used;
+- run policy, such as `commit_required=true`.
+
+This keeps tool-specific instructions together while avoiding many partially tested combinations. For example, the Codex profile adds sandbox network access only when worker tools are requested, and adds scoped git-directory access only when commits are required.
 
 ## Failure Semantics
 

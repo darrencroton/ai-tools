@@ -13,6 +13,8 @@ Slice artifact directory: {slice_artifact_dir}
 Result schema: {result_schema_path}
 Worker helper: {worker_jobs_path}
 Worker artifact root: {worker_artifact_root}
+Slice temp directory: {slice_tmp_dir}
+Tool home root: {tool_home_root}
 Copilot home: {copilot_home}
 Selected slice: {slice_id} - {slice_title}
 
@@ -47,7 +49,7 @@ Required workflow:
 
 Worker helper sequence:
 - If you use an external AI worker, launch it through the worker helper so MC gets durable artifacts.
-- MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}` and `COPILOT_HOME={copilot_home}` for this slice.
+- MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}`, `MC_SLICE_TMP_DIR={slice_tmp_dir}`, `MC_TOOL_HOME_ROOT={tool_home_root}`, `TMPDIR={slice_tmp_dir}`, and `COPILOT_HOME={copilot_home}` for this slice.
 - Create one worker run directory before starting workers:
 
     `run_dir="$(python3 {worker_jobs_path} init --prefix workers)"`
@@ -66,10 +68,24 @@ Worker helper sequence:
 
     `python3 {worker_jobs_path} cancel --run-dir "$run_dir" --label <label>`
 
+Worker evidence:
+- If any worker is used, write `worker-evidence.md` under `{slice_artifact_dir}`.
+- Use this template:
+
+    `# Worker Evidence`
+    `- Label: <label>`
+    `- Role/tool: <role>/<tool>`
+    `- Purpose: <bounded support task>`
+    `- Run directory: <run_dir>`
+    `- Extract command: python3 {worker_jobs_path} extract --run-dir "<run_dir>" --label "<label>"`
+    `- Result summary: <what the worker concluded or produced>`
+    `- Sufficiency: <why this was enough or why it was not enough>`
+
 Write these artifacts under `{slice_artifact_dir}`:
 - `validation-summary.md`
 - `drift-audit.md`
 - `code-review.md`
+- `worker-evidence.md` when any worker is used
 - `orchestrator-result.json`
 
 The final `orchestrator-result.json` must match the schema in `{result_schema_path}`.

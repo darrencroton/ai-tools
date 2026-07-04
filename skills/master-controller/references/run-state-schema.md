@@ -92,7 +92,22 @@ Runtime slices append entries to `slices`:
 
 Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
-Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+
+MC sets these environment variables for every slice harness:
+
+- `MC_SLICE_ARTIFACT_DIR`
+- `MC_RUN_JSON_PATH`
+- `MC_PLAN_PATH`
+- `MC_SLICE_ID`
+- `MC_RESULT_SCHEMA_PATH`
+- `MC_WORKER_JOBS_PATH`
+- `MC_WORKER_ARTIFACT_ROOT`
+- `AI_ORCHESTRATOR_ARTIFACT_ROOT`
+- `MC_SLICE_TMP_DIR`
+- `TMPDIR`
+- `MC_TOOL_HOME_ROOT`
+- `COPILOT_HOME`
 
 ## `orchestrator-result.json`
 

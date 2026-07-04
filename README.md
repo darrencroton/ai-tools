@@ -114,12 +114,23 @@ python3 skills/master-controller/scripts/mc.py init \
   --plan /path/to/plan.md \
   --harness codex
 
+python3 skills/master-controller/scripts/mc.py preflight \
+  --repo /path/to/repo \
+  --worker-tools copilot \
+  --allow-profile-command
+
 python3 skills/master-controller/scripts/mc.py run-next --repo /path/to/repo --dry-run
-python3 skills/master-controller/scripts/mc.py run --repo /path/to/repo --scope remaining
+python3 skills/master-controller/scripts/mc.py run \
+  --repo /path/to/repo \
+  --scope remaining \
+  --worker-tools copilot \
+  --allow-profile-command
 python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 ```
 
-MC is still not a planner. It consumes the implementation-plan contract, refuses incomplete or approval-gated slices, and stops on missing evidence, failed validation, drift, review failure, unauthorized files, dirty post-commit state, harness failure, or any condition outside policy.
+Use `--worker-tools` only when the run requires external workers; omit it for a plain orchestrator-only run. Use `--allow-profile-command` for normal local MC execution so MC composes the tested harness command from the selected tool profile and run requirements instead of relying on hand-written sandbox flags.
+
+MC is still not a planner. It consumes the implementation-plan contract, refuses incomplete or approval-gated slices, and stops on missing evidence, failed validation, drift, review failure, unauthorized files, dirty post-commit state, harness failure, or any condition outside policy. When a user gives a complete plan and says to implement it through MC, the default operating path is: initialize or reuse the run, preflight, dry-run the next slice, run the requested scope with profile commands, summarize, and inspect artifacts before reporting.
 
 ## Setup
 
