@@ -1,6 +1,6 @@
 # AI Orchestrator
 
-A skill for AI coding assistants (Claude Code, Codex CLI, GitHub Copilot CLI) that turns the current assistant into an **orchestrator** — selectively routing coding and analysis work to external AI CLI tools while retaining ownership of planning, authorization, quality, final synthesis, and final delivery.
+A skill for AI coding assistants that turns the current assistant into an **orchestrator** — selectively routing coding and analysis work to external AI CLI tools while retaining ownership of planning, authorization, quality, final synthesis, and final delivery.
 
 ## Purpose
 
@@ -8,33 +8,27 @@ The orchestrator delegates selectively when a worker will improve quality, speed
 
 Workers produce inputs, evidence, drafts, and implementation. The orchestrator remains the finisher and must retain the final user-facing deliverable, authorization decisions, accept-or-reject decisions, and correctness-critical judgment.
 
-This skill is standalone. It can run by itself with only the files in this repository. When installed alongside [`ai-tools`](https://github.com/darrencroton/ai-tools), it can also coordinate companion skills such as [`implementation-plan`](../implementation-plan/), [`scoped-implementation`](../scoped-implementation/), [`drift-audit`](../drift-audit/), [`code-review`](../code-review/), [`code-simplifier`](../code-simplifier/), [`handoff`](../handoff/), and [`commit`](../commit/).
+This skill is standalone. It can run by itself with only the files in this repository. When installed alongside [`ai-tools`](https://github.com/darrencroton/ai-tools), it can also coordinate companion skills through the local skill map in [`SKILL.md`](SKILL.md).
 
 ## Supported Tools
 
-| Tool | Role | Best for |
-|---|---|---|
-| **Claude Code** (`claude`) | Orchestrator, Senior worker | Complex edits, refactors, deep debugging, plan review |
-| **Codex CLI** (`codex`) | Orchestrator, Senior worker | Complex edits, refactors, deep debugging, plan review |
-| **GitHub Copilot CLI** (`copilot`) | Junior worker | Surgical edits, git/GitHub ops, low-stakes research, codebase mapping |
+Supported worker harnesses are defined by the model table in [`SKILL.md`](SKILL.md) and the files in [`references/`](references/). Avoid duplicating that list here; harness support is expected to change as tools are added, removed, or renamed.
 
 ## Structure
 
 ```
 SKILL.md                  # Main skill definition, roles, workflow, model table
-ai-reminder               # tmux reminder helper for Codex/Claude sessions
+ai-reminder               # tmux reminder helper for long-running assistant sessions
 scripts/
   worker_jobs.py          # tracked worker launcher/status/activity/cancel/extract helper
 references/
-  claude.md               # Claude Code CLI reference and commands
-  codex.md                # Codex CLI reference and commands
-  copilot.md              # GitHub Copilot CLI reference and commands
+  <harness>.md            # Harness-specific CLI references and commands
   templates.md            # Delegation prompt templates by role and task type
 ```
 
 ## Usage
 
-This skill is loaded by an AI coding assistant that supports skill files (e.g. Claude Code). Once loaded, the assistant acts as orchestrator and uses the templates and model references to delegate work.
+This skill is loaded by an AI coding assistant that supports skill files. Once loaded, the assistant acts as orchestrator and uses the templates and model references to delegate work.
 
 Operating conventions:
 - Start with a short execution checklist and keep it updated through the run
@@ -59,35 +53,25 @@ The orchestrator does not assume workers will infer skills from context. Every w
 
 When a required skill is available to a worker, the worker should read that skill before acting. When it is not available, the worker should report `skill unavailable: <name>` and continue with the explicit task contract in the prompt.
 
-Common companion skills when this repository is used with `ai-tools`:
-
-| Skill | How the orchestrator uses it |
-|---|---|
-| [`implementation-plan`](../implementation-plan/) | Plan-first workflow; freeze slices, authorized surfaces, validation plans, and rollback paths |
-| [`scoped-implementation`](../scoped-implementation/) | Implementation workflow; execute one frozen slice and prepare drift-audit input |
-| [`drift-audit`](../drift-audit/) | Authorization gate after implementation and before quality review |
-| [`code-review`](../code-review/) | Quality gate after drift audit, or standalone code review |
-| [`code-simplifier`](../code-simplifier/) | Explicit separate simplification/refactor pass for working code |
-| [`handoff`](../handoff/) | Preserve task state, frozen contract, validation, and next action |
-| [`commit`](../commit/) | Approved git commits with explicit staging and complete commit messages |
+Common companion skills are listed in the local skill map in [`SKILL.md`](SKILL.md). That map is the source of truth for how orchestration coordinates with other skills.
 
 The companion skills are helpful but not mandatory. The orchestrator prompts carry the essential contract so workers can still complete or audit the task when those skills are unavailable.
 
 Trigger conditions:
 - The user wants to delegate a task to an external AI agent
-- The user mentions `claude`, `codex`, or `copilot` explicitly
+- The user mentions a supported external harness explicitly
 - The user asks to "use another model"
 - The user wants to spread work across multiple models
 
 ## Optional Helper
 
-`ai-reminder` is a small companion script for long-running Codex or Claude sessions. The skill itself works without it, but on long coding tasks an orchestrator can drift and stop delegating as consistently as the workflow intends. Running `ai-reminder` alongside the session provides a periodic nudge back toward the current task, plan, and delegation discipline.
+`ai-reminder` is a small companion script for long-running terminal assistant sessions. The skill itself works without it, but on long coding tasks an orchestrator can drift and stop delegating as consistently as the workflow intends. Running `ai-reminder` alongside the session provides a periodic nudge back toward the current task, plan, and delegation discipline.
 
 NOTE: The orchestrator must be running inside a tmux pane for `ai-reminder` to work.
 
 Typical usage:
-- `ai-reminder start --tool codex`
-- `ai-reminder start --tool claude --interval 120`
+- `ai-reminder start --tool <harness>`
+- `ai-reminder start --tool <harness> --interval 120`
 
 Ensure the script is executable before first use: `chmod +x ai-reminder`.
 

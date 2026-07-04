@@ -1,37 +1,33 @@
 #!/usr/bin/env bash
-# ~/Documents/AI Tools/setup.sh  (lives in iCloud Drive — synced automatically across Macs)
+# ~/Documents/AI Tools/setup.sh  (lives in the synced shared config directory)
 #
-# Wires up the cross-platform AI agent configuration on any machine.
+# Wires up shared AI agent configuration for the tools registered in tools.conf.
 # Safe to re-run — skips anything already configured, warns on conflicts.
 #
 # ── What this sets up ────────────────────────────────────────────────────────
 #
-#   iCloud Drive ~/Documents/AI Tools/   ← single source of truth (this directory)
+#   ~/Documents/AI Tools/   ← single source of truth (this directory)
 #   ├── AGENTS.md                    global instructions for all AI tools
 #   ├── setup.sh                     this script
 #   ├── tools.conf                   registered AI tools (edit to add new ones)
-#   └── skills/
-#       ├── commit/                  (e.g.) git commit workflow skill
-#       └── handoff/                 (e.g.) session handoff skill (cross-platform)
+#   └── skills/                      shared skill library
 #
 #   ~/.agents/              → ~/Documents/AI Tools/     (symlink, created manually)
-#   ~/.claude/CLAUDE.md     → ~/.agents/AGENTS.md       (per tools.conf)
-#   ~/.codex/AGENTS.md      → ~/.agents/AGENTS.md       (per tools.conf)
-#   ~/.claude/skills        → ~/.agents/skills/          (whole dir, all tools)
-#   ~/.codex/skills         → ~/.agents/skills/
+#   <tool>/<instructions>   → ~/.agents/AGENTS.md       (per tools.conf)
+#   <tool>/skills           → ~/.agents/skills/          (per tools.conf)
 #
 # ── New machine setup (two commands) ─────────────────────────────────────────
 #
 #   Prerequisites: AI tools installed and signed in,
-#                  iCloud Drive synced so ~/Documents/AI Tools/ is available.
+#                  the shared config directory synced or copied into place.
 #
 #   ln -s "$HOME/Documents/AI Tools" ~/.agents
 #   bash ~/.agents/setup.sh
 #
-# ── Adding a new AI tool (e.g. Gemini) ───────────────────────────────────────
+# ── Adding a new AI tool ─────────────────────────────────────────────────────
 #
 #   1. Add a line to ~/Documents/AI Tools/tools.conf:
-#        ~/.gemini    GEMINI.md
+#        <config_dir>    <instructions_filename>
 #   2. Re-run: bash ~/.agents/setup.sh
 #   No other changes needed.
 #
@@ -48,10 +44,10 @@
 #
 #   1. Back up the existing file (review it, merge anything useful into
 #      ~/.agents/AGENTS.md, then discard):
-#        cp ~/.claude/CLAUDE.md ~/claude-global-backup.md
+#        cp "<tool>/<instructions_filename>" ~/agent-instructions-backup.md
 #
 #   2. Force-create the symlink:
-#        ln -sf "$HOME/.agents/AGENTS.md" "$HOME/.claude/CLAUDE.md"
+#        ln -sf "$HOME/.agents/AGENTS.md" "<tool>/<instructions_filename>"
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -60,7 +56,7 @@ set -euo pipefail
 AGENTS_DIR="$HOME/.agents"
 TOOLS_CONF="$AGENTS_DIR/tools.conf"
 
-echo "=== Cross-platform agent setup ==="
+echo "=== Shared agent setup ==="
 echo "    Source: $(realpath "$AGENTS_DIR")"
 echo ""
 

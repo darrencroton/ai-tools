@@ -14,16 +14,20 @@ Both paths use the same skill chain. They differ only in who holds the gates and
 
 ## Skills
 
+This README is the maintained human-facing skill index. Each skill's own `SKILL.md` remains the source of truth for trigger conditions, detailed workflow, and output format.
+
 | Skill | What it does |
 |-------|-------------|
 | [`implementation-plan`](skills/implementation-plan/) | Breaks a request into narrow, ordered slices. Each slice gets acceptance criteria, an authorized surface, tests to run, risky surfaces flagged, and a copyable prompt for the next chat. |
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope. Restates the authorized surface before coding, stays inside approved files, and prepares a receipt for drift audit. |
-| [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Compares actual changes against the frozen contract — before any quality review. |
+| [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Compares actual changes against the frozen contract before any quality review. |
 | [`code-review`](skills/code-review/) | Performs a senior-level review after drift audit passes. Covers correctness, edge cases, tests, error handling, maintainability, and domain-specific risks. |
-| [`ai-orchestrator`](skills/ai-orchestrator/) | Manages delegation to external AI tools (Claude Code, Codex, Copilot) when independence, parallel work, or context economy helps. Owns planning, verification, and final responsibility — workers produce inputs, the orchestrator decides. |
-| [`code-simplifier`](skills/code-simplifier/) | Refines working code for clarity and maintainability without changing behaviour. A separate cleanup pass — not part of the default implementation flow. |
+| [`ai-orchestrator`](skills/ai-orchestrator/) | Manages delegation to external AI tools when independence, parallel work, or context economy helps. Owns planning, verification, and final responsibility. |
+| [`code-simplifier`](skills/code-simplifier/) | Refines working code for clarity and maintainability without changing behaviour. A separate cleanup pass, not part of the default implementation flow. |
 | [`handoff`](skills/handoff/) | Writes a compact handoff file when continuing in another chat. Captures current status, what's left, blockers, and the single best next action. |
 | [`commit`](skills/commit/) | Stages and commits specific files by name, never skips hooks, and writes a message that lists changed files with reasons. Only called after explicit approval. |
+| [`report`](skills/report/) | Produces structured engineering reports for investigations, bug hunts, comparisons, status updates, and final summaries. |
+| [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
 
 ## Workflow
 
@@ -37,7 +41,7 @@ The default flow for feature or bug work:
 6. **Hand off** (if needed) — call `handoff` before ending a session that isn't finished.
 7. **Commit** — call `commit` only after you approve.
 
-Use `ai-orchestrator` when delegation improves quality, speed, or context management — for codebase mapping, plan critique, hostile drift audit, independent review, or long-running tests.
+Use `ai-orchestrator` when delegation improves quality, speed, or context management, such as independent review, plan critique, codebase mapping, or long-running validation.
 
 Use explicit skill calls. Do not rely on the model to guess which workflow applies.
 
@@ -99,17 +103,10 @@ When all slices are complete, write a final summary: slices committed, gate resu
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
 
-## Additional Skills
-
-| Skill | What it does |
-|-------|-------------|
-| [`report`](skills/report/) | Produces structured engineering reports — investigations, bug hunts, comparisons, status updates, or final summaries — with consistent scope, evidence, findings, and next actions. |
-| [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
-
 ## Setup
 
 - `AGENTS.md`: global instructions used across AI coding assistants
 - `setup.sh`: links shared AI coding configuration files into local tool directories
 - `tools.conf`: tool registration used by the setup script
-- `skills/`: the skill library
+- `skills/`: shared skill library; each skill documents itself in its own `SKILL.md`
 - Generated files and local artefacts are excluded via `.gitignore`
