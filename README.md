@@ -19,6 +19,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | Skill | What it does |
 |-------|-------------|
 | [`implementation-plan`](skills/implementation-plan/) | Breaks a request into auditable slices, with optional batches when stronger implementers can safely combine related slices. Each slice gets acceptance criteria, an authorized surface, validation, risk flags, and a copyable prompt for the next chat. |
+| [`master-controller`](skills/master-controller/) | Supervises execution of an existing implementation plan one slice at a time. Creates durable run state, checks slice eligibility, and later owns tmux supervision and gate verification without becoming a planner. |
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope. Restates the authorized surface before coding, stays inside approved files, and prepares a receipt for drift audit. |
 | [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Compares actual changes against the frozen contract before any quality review. |
 | [`code-review`](skills/code-review/) | Performs a senior-level review after drift audit passes. Covers correctness, edge cases, tests, error handling, maintainability, and domain-specific risks. |
