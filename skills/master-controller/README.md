@@ -178,6 +178,10 @@ Model-supervised sequence:
 
 Rolling 5-hour usage windows are recoverable operational pauses when the reset time or duration is clear, the harness process is still alive, no hard-stop prompt is visible, and the pause stays inside configured budgets. Weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, and ambiguous conditions stop for the user with evidence. If a rolling-limit message appears after the harness process exits without a structured result, MC must restart only from a clean authorized state or stop for the user.
 
+`observe` and `wait` expose `operational_hints` in their JSON output. These hints summarize common pane/transcript evidence such as rolling usage limits, weekly/monthly/account limits, service unavailable messages, network transients, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result. Ordinary hints are evidence for the MC model, not commands. Hard-stop hints are deterministic guards: `send`, `pause-until`, and wait/retry/resume paths refuse unattended continuation when weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect evidence is present.
+
+Reset parsing is intentionally narrow. Relative durations such as `try again in 3 hours` are preferred. Absolute local reset times are accepted only when they are unambiguously near-future in the controller timezone or include an explicit timezone; otherwise MC reports an unknown-limit hard stop for human judgment.
+
 ## Profiles and Launch Requirements
 
 MC stores one profile per tool instead of one profile per possible role combination. Tool profiles describe stable capabilities and constraints: Codex and Claude can be orchestrators or senior workers, Copilot is a junior worker, and OpenCode is a placeholder until its unattended harness contract is tested.
@@ -260,6 +264,7 @@ The model-supervised transition adds these durable concepts without changing det
 - `current_slice.before_head`: records the commit at slice start for out-of-process finalization.
 - `current_slice.orchestrator_session_id`: records the launched Claude session id when MC composed one for transcript capture.
 - `current_slice.pause`: records `paused_until`, `reason`, and an evidence event id when a bounded pause is active.
+- `operational_hints`: appears in observation JSON with `kind`, optional `subtype`, confidence, reset/retry fields when parseable, `hard_stop`, evidence excerpt, source, detection time, and recovery guidance.
 
 The model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. They must not accept work by interpreting natural-language output; they only provide operational control and evidence capture before deterministic gates run.
 

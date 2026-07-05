@@ -74,9 +74,12 @@ MC must stop on:
 - Any proposed destructive filesystem action outside the target repo/worktree.
 - Secret exposure, credential prompt, dependency/license change, remote push, release, deploy, or external side effect not explicitly authorized.
 - Weekly, monthly, account, or billing usage caps.
+- Unknown or ambiguous usage-limit messages without a clear bounded reset.
 - Ambiguous operational interruptions after reasonable observation.
 
 MC may recover from a rolling 5-hour usage window, temporary service interruption, or similar transient only when pane/log evidence is clear, the recovery is bounded, the same slice contract remains in force, no hard-stop prompt is visible, and incomplete work is not accepted as passing. Operational screen text can guide wait, retry, resume, or stop decisions; it can never accept a slice.
+
+`observe` and `wait` include lightweight `operational_hints` extracted from pane and transcript tails. Treat ordinary hints as evidence for MC-model judgment, not as automatic decisions. Treat hard-stop hints as a deterministic floor: `send`, `pause-until`, and any unattended retry/resume must refuse when the visible evidence indicates weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect conditions. Prefer relative reset durations over absolute local times; absolute local reset times are usable only when they are unambiguously near-future for the controller timezone or include an explicit timezone.
 
 MC decisions must not rely only on natural-language transcript interpretation. The orchestrator must produce `orchestrator-result.json`, and MC must verify claims against local evidence.
 

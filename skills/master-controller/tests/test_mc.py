@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -702,6 +703,158 @@ Continue later.
                 mc.send(args)
         fake_adapter.send_literal.assert_not_called()
 
+    def test_operational_hints_parse_rolling_limit_duration(self):
+        now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
+
+        hints = mc.extract_operational_hints(
+            "Usage limit reached. Try again in 2 hours 30 minutes.",
+            process_running=True,
+            result_exists=False,
+            now=now,
+        )
+
+        usage = next(hint for hint in hints if hint["kind"] == "usage_limit")
+        self.assertEqual(usage["subtype"], "rolling_window")
+        self.assertFalse(usage["hard_stop"])
+        self.assertEqual(usage["retry_after_seconds"], 9000)
+        self.assertEqual(usage["reset_at"], "2026-07-05T16:30:00+10:00")
+        self.assertEqual(usage["recovery_guidance"], "pause-until-reset-plus-buffer-then-send-continuation")
+
+    def test_operational_hints_parse_rolling_limit_absolute_time_around_midnight(self):
+        now = datetime(2026, 7, 5, 23, 55, tzinfo=timezone(timedelta(hours=10)))
+
+        hints = mc.extract_operational_hints(
+            "Session limit reached and will reset at 12:10AM.",
+            process_running=True,
+            result_exists=False,
+            now=now,
+        )
+
+        usage = next(hint for hint in hints if hint["kind"] == "usage_limit")
+        self.assertEqual(usage["subtype"], "rolling_window")
+        self.assertFalse(usage["hard_stop"])
+        self.assertEqual(usage["reset_at"], "2026-07-06T00:10:00+10:00")
+
+        utc_hints = mc.extract_operational_hints(
+            "Usage limit reached and will reset at 14:30 UTC.",
+            process_running=True,
+            result_exists=False,
+            now=datetime(2026, 7, 5, 14, 0, tzinfo=timezone.utc),
+        )
+        utc_usage = next(hint for hint in utc_hints if hint["kind"] == "usage_limit")
+        self.assertEqual(utc_usage["reset_at"], "2026-07-05T14:30:00+00:00")
+
+    def test_operational_hints_prefer_relative_duration_over_absolute_time(self):
+        now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
+
+        hints = mc.extract_operational_hints(
+            "Usage limit reached. It resets at 6:00pm, but try again in 45 minutes.",
+            process_running=True,
+            result_exists=False,
+            now=now,
+        )
+
+        usage = next(hint for hint in hints if hint["kind"] == "usage_limit")
+        self.assertEqual(usage["retry_after_seconds"], 2700)
+        self.assertEqual(usage["reset_at"], "2026-07-05T14:45:00+10:00")
+
+    def test_operational_hints_mark_weekly_monthly_account_and_unknown_limits_hard_stop(self):
+        cases = [
+            ("Weekly usage limit reached. Try again next week.", "weekly_window"),
+            ("Monthly quota cap reached for this workspace.", "monthly_window"),
+            ("Subscription plan limit exhausted. Upgrade billing to continue.", "account_or_billing"),
+            ("Usage limit reached.", "unknown_limit"),
+        ]
+        for text, subtype in cases:
+            with self.subTest(subtype=subtype):
+                hints = mc.extract_operational_hints(text, process_running=True, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+                usage = next(hint for hint in hints if hint["kind"] == "usage_limit" and hint["subtype"] == subtype)
+                self.assertTrue(usage["hard_stop"])
+                self.assertEqual(usage["recovery_guidance"], "stop-for-user")
+
+    def test_operational_hints_classify_service_unavailable_and_ambiguous_absolute_reset(self):
+        now = datetime(2026, 7, 5, 0, 10, tzinfo=timezone(timedelta(hours=10)))
+
+        service = mc.extract_operational_hints(
+            "Service unavailable. Please try again later in 10 minutes.",
+            process_running=True,
+            now=now,
+        )
+        service_hint = next(hint for hint in service if hint["kind"] == "service_unavailable")
+        self.assertFalse(service_hint["hard_stop"])
+        self.assertEqual(service_hint["retry_after_seconds"], 600)
+
+        ambiguous = mc.extract_operational_hints(
+            "Session limit reached and will reset at 11:55pm.",
+            process_running=True,
+            now=now,
+            max_single_pause_seconds=21600,
+        )
+        usage = next(hint for hint in ambiguous if hint["kind"] == "usage_limit")
+        self.assertEqual(usage["subtype"], "unknown_limit")
+        self.assertTrue(usage["hard_stop"])
+
+    def test_operational_hints_distinguish_live_and_exited_rolling_limit_guidance(self):
+        now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone.utc)
+        text = "Usage limit reached. Try again in 1 hour."
+
+        live = mc.extract_operational_hints(text, process_running=True, result_exists=False, now=now)
+        exited = mc.extract_operational_hints(text, process_running=False, result_exists=False, now=now)
+        ready = mc.extract_operational_hints(text, process_running=False, result_exists=True, now=now)
+
+        self.assertEqual(
+            next(h for h in live if h["kind"] == "usage_limit")["recovery_guidance"],
+            "pause-until-reset-plus-buffer-then-send-continuation",
+        )
+        self.assertEqual(
+            next(h for h in exited if h["kind"] == "usage_limit")["recovery_guidance"],
+            "restart-from-clean-authorized-state-or-stop-for-user",
+        )
+        self.assertEqual(next(h for h in ready if h["kind"] == "usage_limit")["recovery_guidance"], "finalize-slice")
+
+    def test_observe_exposes_operational_hints_and_send_refuses_hard_stop_hint(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Weekly usage limit reached."}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            text="continue",
+            reason="test",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(mc.observe(args), 0)
+            snapshot = json.loads(output.getvalue())
+            self.assertEqual(snapshot["operational_hints"][0]["kind"], "usage_limit")
+            self.assertTrue(snapshot["operational_hints"][0]["hard_stop"])
+            with self.assertRaisesRegex(mc.McError, "hard-stop operational hint"):
+                mc.send(args)
+        fake_adapter.send_literal.assert_not_called()
+
     def write_gate_result(self, artifact, *, changed_files, validation_result="pass", drift="PASS", review="PASS", commit_hash=None):
         artifact.mkdir(parents=True, exist_ok=True)
         (artifact / "validation-summary.md").write_text("validation\n", encoding="utf-8")
@@ -1114,6 +1267,92 @@ Continue later.
         self.assertEqual(paused["status"], "resuming")
         self.assertIsNone(paused["current_slice"]["pause"])
         self.assertEqual(paused["supervision"]["pause_counters"]["consecutive_pauses_current_slice"], 1)
+
+    def test_wait_returns_when_hard_stop_hint_appears(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Monthly quota limit reached."}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=30,
+            poll_seconds=0.1,
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(mc.wait(args), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["wait_status"], "hard-stop-hint")
+        self.assertTrue(result["observation"]["operational_hints"][0]["hard_stop"])
+
+    def test_pause_until_refuses_hard_stop_hint_and_budget_exhaustion(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        state["supervision"]["max_single_pause_seconds"] = 0
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Session limit reached. Try again in 1 minute."}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            until=(datetime.now(timezone.utc) + timedelta(minutes=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            buffer_seconds=0,
+            reason="rolling reset",
+            poll_seconds=0.1,
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with self.assertRaisesRegex(mc.McError, "max_single_pause_seconds"):
+                mc.pause_until(args)
+
+        state["supervision"]["max_single_pause_seconds"] = 21600
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Weekly usage limit reached."}
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with self.assertRaisesRegex(mc.McError, "hard-stop operational hint"):
+                mc.pause_until(args)
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_remaining_completes_two_toy_slices(self):

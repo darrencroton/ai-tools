@@ -148,6 +148,50 @@ Example line:
 
 Append-only event writes must not rewrite unrelated `run.json` state.
 
+## Operational Hints
+
+`observe` and `wait` include an `operational_hints` array in their JSON output. Hints are extracted from live pane text and the transcript tail when present. They are not acceptance evidence and they do not finalize gates.
+
+Example hint:
+
+```json
+{
+  "kind": "usage_limit",
+  "confidence": "high",
+  "subtype": "rolling_window",
+  "reset_at": "2026-07-04T08:30:00+10:00",
+  "retry_after_seconds": null,
+  "hard_stop": false,
+  "evidence_excerpt": "session limit reached and will reset at 8:30am",
+  "source": "tmux-pane",
+  "detected_at": "2026-07-04T01:40:00+10:00",
+  "recovery_guidance": "pause-until-reset-plus-buffer-then-send-continuation"
+}
+```
+
+Current hint kinds are:
+
+- `usage_limit`
+- `service_unavailable`
+- `network_transient`
+- `auth_required`
+- `trust_prompt`
+- `permission_prompt`
+- `external_side_effect_request`
+- `idle_no_progress`
+- `process_exited_without_result`
+- `result_ready`
+
+Usage-limit subtypes are:
+
+- `rolling_window`
+- `weekly_window`
+- `monthly_window`
+- `account_or_billing`
+- `unknown_limit`
+
+Hard-stop hints are deterministic guards, not just advice. `send`, `pause-until`, and unattended retry/resume paths must refuse when the strongest visible hint is weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect related. Relative reset durations are preferred over absolute times. Absolute local reset times are accepted only when they are unambiguously near-future for the controller timezone or include an explicit timezone; otherwise they become `unknown_limit` hard stops.
+
 ## Current Slice
 
 `current_slice.before_head` records the commit at the beginning of the active slice attempt. This is mandatory for `finalize-slice` because out-of-process finalization must compare changed files against the real slice start. Guessing `HEAD^` can miss earlier commits made by the same slice.

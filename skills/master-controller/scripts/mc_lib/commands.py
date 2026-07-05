@@ -48,6 +48,7 @@ from .profiles import harness_supports_role, parse_worker_tools, profile_command
 from .runtime import (
     capture_worker_runs_summary,
     environment_preflight,
+    extract_operational_hints,
     result_schema_path,
     sensitive_artifact_dirs,
     slice_dir_name,
@@ -252,6 +253,39 @@ def _result_status(result_path: Path) -> dict[str, Any]:
     }
 
 
+def _read_tail(path: Path, limit: int = 4000) -> str:
+    if not path.exists():
+        return ""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - (limit * 4)))
+        text = handle.read().decode("utf-8", errors="replace")
+    return text[-limit:]
+
+
+def _hard_stop_hint_kinds(snapshot: dict[str, Any]) -> list[str]:
+    hints = snapshot.get("operational_hints")
+    if not isinstance(hints, list):
+        return []
+    kinds: list[str] = []
+    for hint in hints:
+        if not isinstance(hint, dict) or not hint.get("hard_stop"):
+            continue
+        kind = str(hint.get("kind") or "unknown")
+        subtype = hint.get("subtype")
+        label = f"{kind}:{subtype}" if subtype else kind
+        if label not in kinds:
+            kinds.append(label)
+    return kinds
+
+
+def _raise_on_hard_stop_hints(snapshot: dict[str, Any], action: str) -> None:
+    kinds = _hard_stop_hint_kinds(snapshot)
+    if kinds:
+        raise McError(f"refusing to {action} while hard-stop operational hint is present: " + ", ".join(kinds))
+
+
 def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
     now_text = utc_now()
     snapshot: dict[str, Any] = {
@@ -267,6 +301,7 @@ def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state
         "current_slice": None,
         "process": {"running": False},
         "prompt_on_screen": {"present": False, "kinds": [], "markers": []},
+        "operational_hints": [],
         "artifacts": {"run_dir": str(run_dir), "operational_events": str(operational_events_file(repo, state))},
         "result": {"exists": False, "parse_status": "no-current-slice"},
         "git": {"status_lines": meaningful_status_lines(git_status_text(repo))},
@@ -299,6 +334,16 @@ def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state
     hard_prompt = adapter.detect_hard_prompt(capture)
     result_path = artifact_dir / "orchestrator-result.json"
     transcript_path = artifact_dir / "orchestrator-transcript.jsonl"
+    result = _result_status(result_path)
+    transcript_tail = _read_tail(transcript_path)
+    hints = extract_operational_hints(
+        capture,
+        transcript_text=transcript_tail,
+        process_running=bool(activity.get("running")),
+        process_active=bool(activity.get("active")),
+        result_exists=bool(result.get("exists")),
+        max_single_pause_seconds=int(state.get("supervision", {}).get("max_single_pause_seconds", 21600)),
+    )
     snapshot.update(
         {
             "current_slice": {
@@ -319,6 +364,11 @@ def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state
                 "tail": capture[-4000:],
                 "tail_truncated": len(capture) > 4000,
             },
+            "transcript": {
+                "path": relative_artifact_path(repo, transcript_path) if transcript_path.exists() else None,
+                "tail": transcript_tail,
+                "tail_truncated": transcript_path.exists() and len(transcript_tail) >= 4000,
+            },
             "artifacts": {
                 "run_dir": str(run_dir),
                 "artifact_dir": relative_artifact_path(repo, artifact_dir),
@@ -327,7 +377,8 @@ def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state
                 "operational_events": str(operational_events_file(repo, state)),
                 "observation_latest": relative_artifact_path(repo, artifact_dir / "observation-latest.json"),
             },
-            "result": _result_status(result_path),
+            "result": result,
+            "operational_hints": hints,
         }
     )
     return snapshot
@@ -347,6 +398,7 @@ def record_observation(repo: Path, state: dict[str, Any], snapshot: dict[str, An
             "process_running": snapshot.get("process", {}).get("running"),
             "result_exists": snapshot.get("result", {}).get("exists"),
             "hard_prompt": snapshot.get("prompt_on_screen", {}),
+            "hard_stop_hints": _hard_stop_hint_kinds(snapshot),
         },
     )
     snapshot["operational_event_id"] = event["event_id"]
@@ -379,6 +431,7 @@ def send(args: argparse.Namespace) -> int:
     hard_prompt = snapshot.get("prompt_on_screen", {})
     if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
         raise McError("refusing to send while hard prompt is visible: " + ", ".join(hard_prompt.get("kinds", [])))
+    _raise_on_hard_stop_hints(snapshot, "send")
     session_name = str(current.get("tmux_session") or "")
     _current_adapter(args, repo, state).send_literal(session_name, args.text)
     event = append_operational_event(
@@ -445,6 +498,9 @@ def _wait_observing(args: argparse.Namespace, repo: Path, run_dir: Path, seconds
         if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
             reason = "hard-prompt"
             break
+        if _hard_stop_hint_kinds(final_snapshot):
+            reason = "hard-stop-hint"
+            break
         if time.monotonic() >= deadline:
             break
         time.sleep(min(float(args.poll_seconds), max(0.0, deadline - time.monotonic())))
@@ -482,6 +538,7 @@ def pause_until(args: argparse.Namespace) -> int:
     hard_prompt = snapshot.get("prompt_on_screen", {})
     if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
         raise McError("refusing to pause while hard prompt is visible: " + ", ".join(hard_prompt.get("kinds", [])))
+    _raise_on_hard_stop_hints(snapshot, "pause")
     try:
         until = parse_iso_datetime(args.until)
     except ValueError as exc:
