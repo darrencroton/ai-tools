@@ -71,7 +71,7 @@ MC must stop on:
 - Required validation failure or missing validation evidence.
 - Drift audit `FAIL`, `BLOCKED`, or unresolved `PASS WITH RISKS`.
 - Code review `FAIL`, any P0/P1 finding, or unresolved material P2 finding.
-- Harness, tmux, timeout, transcript, or artifact capture failure.
+- Harness, tmux, terminal timeout, transcript, or artifact capture failure.
 - Any proposed destructive filesystem action outside the target repo/worktree.
 - Secret exposure, credential prompt, dependency/license change, remote push, release, deploy, or external side effect not explicitly authorized.
 - Weekly, monthly, account, or billing usage caps.

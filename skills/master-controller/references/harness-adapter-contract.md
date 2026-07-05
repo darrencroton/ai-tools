@@ -2,21 +2,26 @@
 
 MC core must not hardcode one AI harness. Each adapter describes how to start, observe, supervise, and stop a tmux-backed orchestrator session in a target repo.
 
-## Adapter Responsibilities
+## Implemented Adapter Responsibilities
 
-An adapter provides:
+The current `TmuxHarnessAdapter` provides these concrete methods:
 
 - `name`: stable harness identifier such as `codex`.
 - `preflight`: command or function that checks local availability without starting a run.
-- `build_start_command`: returns the shell command used inside tmux, including MC environment variables for the run state, plan path, slice id, and slice artifact directory.
+- `build_shell_command`: returns the shell command used inside tmux, including MC environment variables for the run state, plan path, slice id, and slice artifact directory.
+- `start`: starts a fresh tmux session in the target repo with the built shell command.
 - `send_prompt`: injects the rendered orchestrator prompt into the tmux session.
 - `send_literal`: send short model-supervised operational text literally to the current tmux session and submit it without shell evaluation.
 - `capture`: writes transcript or pane output to the slice artifact directory.
 - `detect_activity`: reports whether the session is still active or idle as `{"running": bool, "active": bool, "capture": string}`.
-- `detect_completion`: checks for explicit completion markers or structured result creation.
 - `detect_hard_prompt`: reports whether the visible pane appears to contain a trust, approval, credential, permission, or external-side-effect prompt that must block unattended send, wait, pause, retry, or resume actions.
 - `request_stop`: asks the harness to stop gracefully.
-- `force_stop`: terminates the tmux session after timeout or failed graceful stop.
+- `force_stop`: terminates the tmux session after a terminal stop/finalize decision or failed graceful stop.
+- `session_exists` and `sessions_with_prefix`: support liveness checks and stale-session cleanup.
+
+Structured result detection is owned by MC's runner and command layer by checking `orchestrator-result.json` in the current slice artifact directory, not by a separate adapter method.
+
+## Primitive-Level Responsibilities
 
 Model-supervised MC commands may compose these adapter responsibilities into primitives:
 
@@ -76,17 +81,19 @@ Profile composition also owns supported model overrides. For example, a Claude r
 
 ## Failure Semantics
 
-Adapters return structured failure reasons instead of raising opaque process errors when possible:
+MC should record stable failure reasons in run state and artifacts instead of exposing opaque process errors when possible. Some reasons come from adapter operations, while others come from MC primitives that compose adapter evidence:
 
 - `missing-harness`
 - `missing-tmux`
 - `start-failed`
 - `prompt-injection-failed`
-- `timeout`
 - `hard-stop-prompt`
 - `pause-budget-exhausted`
 - `capture-failed`
 - `result-missing`
 - `stop-failed`
+- `timeout`
+
+`timeout` is terminal for deterministic batch execution when the result file never appears before the configured deadline. In model-supervised operation, a bounded `wait` timeout is an observation result, not an acceptance or failure verdict by itself; the MC model must then choose a safe next primitive such as another wait, `pause-until`, `send`, `finalize-slice`, or `stop-with-evidence`.
 
 MC records terminal failures in run state and stops rather than retrying indefinitely. Model-supervised waits and pauses are not acceptance states; they preserve evidence and return control for a later observe, send, finalize, or stop decision. Acceptance still requires `orchestrator-result.json` plus deterministic validation, authorization, drift audit, code review, commit, and clean-worktree gates.
