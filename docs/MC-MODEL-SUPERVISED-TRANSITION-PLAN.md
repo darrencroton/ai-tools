@@ -115,11 +115,13 @@ Return a compact machine-readable snapshot for the active slice.
 Expected data:
 
 - run id, status, current slice id/title/attempt
+- slice starting commit evidence, including `current_slice.before_head`
 - tmux session name
 - harness name and model if recorded
 - current wall-clock time with timezone and UTC
 - elapsed seconds since slice start
 - process running/dead
+- whether the screen currently appears to contain a trust, approval, credential, permission, or external-side-effect prompt
 - pane text tail and full latest capture path
 - transcript tail path and summary metadata when available
 - `orchestrator-result.json` existence and parse status
@@ -137,7 +139,10 @@ Safety requirements:
 - Only send to the current slice's recorded tmux session.
 - Refuse if there is no active current slice.
 - Refuse if the run is not in a resumable/running/paused state.
-- Record the sent text, timestamp, and reason in run state or an operational event artifact.
+- Refuse if `observe` detects a trust, approval, credential, permission, or external-side-effect prompt on screen.
+- Send text literally, not through shell evaluation.
+- Reuse the existing prompt-submission discipline from the tmux adapter: paste or send literal text, allow the TUI to settle, and submit robustly enough to avoid the known single-Enter race that leaves pasted text unsent.
+- Record the sent text, timestamp, and reason in an append-only operational event artifact; mirror only compact current-state pointers in `run.json`.
 
 ### `wait`
 
@@ -149,6 +154,7 @@ Expected behaviour:
 - Append observation records to an operational log.
 - Return early if `orchestrator-result.json` appears, the process exits, a deterministic hard-stop signal appears, or a max wait expires.
 - Do not finalize gates automatically.
+- Use one writer at a time for `run.json`; high-frequency observations should go to append-only JSONL artifacts rather than repeatedly rewriting the main state file.
 
 ### `pause-until`
 
@@ -159,7 +165,9 @@ Expected behaviour:
 - Persist `paused_until`, `pause_reason`, and evidence excerpt in `run.json`.
 - Periodically observe and capture state.
 - Return for MC model judgment when the pause expires or an earlier hard-stop signal appears.
-- Handle timezone explicitly. If the pane gives a local reset time, interpret it using the controller environment timezone unless the message supplies a timezone.
+- Refuse to pause when the strongest available hint indicates a weekly, monthly, account, billing, credential, trust, approval, unknown-limit, or otherwise hard-stop condition.
+- Handle timezone explicitly. Prefer relative durations such as "try again in 3 hours". Accept absolute local reset times only when they include a timezone or are unambiguously in the near future for the controller environment timezone; otherwise classify the time as ambiguous and stop for the user or ask for human judgment.
+- Enforce pause budgets such as maximum single pause, consecutive pauses, and cumulative paused seconds per slice/run.
 
 ### `start-slice`
 
@@ -168,6 +176,7 @@ Start the next eligible slice but do not block until completion. This replaces t
 Expected behaviour:
 
 - Perform the same eligibility, clean-worktree, plan digest, branch, and harness preflight checks as current `execute_slice`.
+- Capture and persist the slice starting commit as `current_slice.before_head` before launching the harness. This value is required later by out-of-process finalization so changed-file verification does not have to guess `HEAD^`.
 - Render prompt and create artifact directories.
 - Launch tmux and send the slice prompt.
 - Record `current_slice`.
@@ -181,9 +190,10 @@ Expected behaviour:
 
 - Capture final pane/transcript/worker/git artifacts.
 - Load and verify `orchestrator-result.json`.
-- Apply existing gate logic.
+- Apply existing gate logic using the persisted `current_slice.before_head`.
 - Append the slice entry and update run status.
 - Kill or close the tmux session only after artifacts are captured and the slice is finalized.
+- If the orchestrator reports `repairable`, return a structured repair decision to the MC model and preserve enough state to restart within the configured repair-attempt cap.
 
 ### `stop-with-evidence`
 
@@ -195,6 +205,7 @@ Expected behaviour:
 - Optionally request graceful stop before force stop.
 - Record reason, evidence excerpt, and suggested next action.
 - Avoid losing the last live pane text.
+- Reap stale or orphaned sessions for the current run when requested by the MC model, while preserving evidence before force stop.
 
 ### `run --scope remaining` Compatibility
 
@@ -207,6 +218,16 @@ Do not make `run --scope remaining` the only documented Mode C path once model-s
 
 - **Mode C1: Model-supervised MC** for intelligent operational handling.
 - **Mode C2: Deterministic batch MC** for simple fail-closed runs where the model does not need live judgment.
+
+### Reuse Existing Tooling Where It Fits
+
+The new MC primitives should not reimplement solved mechanics without reason. Before writing new wait, activity, session, or injection logic, inspect and reuse or adapt:
+
+- `skills/ai-orchestrator/scripts/worker_jobs.py` for wait-loop cadence, activity health summaries, session transcript lookup, and extraction patterns.
+- `skills/ai-orchestrator/ai-reminder` for safe literal tmux text injection and transcript-activity monitoring patterns.
+- Existing `TmuxHarnessAdapter` readiness, trust-prompt detection, capture, and submit-race handling.
+
+Reuse does not mean coupling MC runtime state to ai-orchestrator run directories. It means borrowing tested patterns or factoring shared helpers when that keeps MC leaner and safer.
 
 ## Operational Event Hints
 
@@ -249,7 +270,15 @@ Recommended usage-limit subtypes:
 - `account_or_billing`
 - `unknown_limit`
 
-The MC model should treat hints as evidence, not commands. For example, `usage_limit` with `subtype=rolling_window` and a parseable `reset_at` strongly supports `pause-until`; `usage_limit` with `subtype=weekly_window` supports `stop-with-evidence`; `unknown_limit` should usually stop.
+The MC model should treat ordinary hints as evidence, not commands. For example, `usage_limit` with `subtype=rolling_window` and a parseable `reset_at` strongly supports `pause-until`, while `usage_limit` with `subtype=weekly_window` supports `stop-with-evidence`.
+
+One exception is required: hard-stop hints are a deterministic floor, not merely advice. `pause-until`, `send` of a continuation prompt, and any automatic retry/resume command must refuse when the strongest available hint is `weekly_window`, `monthly_window`, `account_or_billing`, `unknown_limit`, `auth_required`, `trust_prompt`, `permission_prompt`, or `external_side_effect_request`. The MC model may always stop earlier, but it must not be able to convert those hard stops into an unattended wait.
+
+Recovery policy must also branch on process state:
+
+- If the harness process is alive at a rolling usage limit, MC may pause until reset plus buffer and then send the continuation prompt after re-observing the screen for hard-stop prompts.
+- If the harness process has exited at a rolling usage limit before writing `orchestrator-result.json`, MC cannot send into the old session. It must either restart the slice from a clean, authorized state or stop for the user if partial edits, commits, or ambiguous state make restart unsafe.
+- If the harness process exited after creating a valid result, MC should finalize the slice rather than resume.
 
 ## State Model Changes
 
@@ -270,11 +299,38 @@ Suggested top-level additions:
     "default_resume_prompt": "You were interrupted. Review what you were doing then continue.",
     "default_reset_buffer_seconds": 180,
     "max_single_pause_seconds": 21600,
+    "max_consecutive_pauses_per_slice": 2,
+    "max_cumulative_pause_seconds_per_run": 43200,
     "max_transient_retries_per_slice": 3
   },
-  "operational_events": []
+  "operational_events_path": ".ai-mc/runs/<run-id>/operational-events.jsonl"
 }
 ```
+
+Keep high-frequency operational history in append-only JSONL files rather than repeatedly rewriting `run.json`. `run.json` should hold the current compact state and pointers to artifact/event files. Any command that writes `run.json` must use a single-writer strategy, such as an advisory lock around read-modify-write. This is required because model-supervised operation may involve separate `wait`, `observe`, `send`, `pause-until`, `finalize-slice`, and human `stop` invocations against the same run.
+
+Suggested `current_slice` additions:
+
+```json
+{
+  "current_slice": {
+    "slice_id": "Slice 2",
+    "title": "Example",
+    "artifact_dir": ".ai-mc/runs/<run-id>/slices/slice-002",
+    "tmux_session": "mc_<run-id>_slice-002_a1",
+    "attempt": 1,
+    "started_at": "2026-07-05T15:00:00+10:00",
+    "before_head": "<commit HEAD immediately before this slice attempt started>",
+    "pause": {
+      "paused_until": "2026-07-05T18:33:00+10:00",
+      "reason": "rolling usage limit reset",
+      "evidence_event_id": "op-0001"
+    }
+  }
+}
+```
+
+Persisting `before_head` in `current_slice` is mandatory for model-supervised finalization. In the current blocking runner this value lives in process memory; once `start-slice` and `finalize-slice` are separate commands, guessing it later risks missing unauthorized files from earlier commits in the same slice.
 
 Suggested event fields:
 
@@ -324,7 +380,7 @@ Update these files during implementation:
 ## Slice Batches
 
 - Batch A: Slices 1-2 — aligns public contract and state schema before code, so implementation has an agreed target.
-- Batch B: Slices 3-4 — adds observe/send/wait primitives and model-supervised start/finalize path; these are coupled through run state and tmux control.
+- Batch B: Slices 3-4 — adds observe/send/wait primitives and model-supervised start/finalize path after the state/concurrency contract exists; these are coupled through run state and tmux control.
 - Batch C: Slices 5-6 — adds operational hints/recovery tests and updates Mode C launcher once primitives are proven.
 
 Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibility review after the new flow works.
@@ -401,7 +457,10 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Current state helpers in `scripts/mc_lib/state.py` and models in `scripts/mc_lib/models.py`.
 - Outputs:
   - Documented `supervision` and `operational_events` state sections.
+  - Documented append-only operational event log path and single-writer or locked `run.json` update strategy.
+  - Documented `current_slice.before_head` so later finalization can verify changed files against the real slice start.
   - Documented optional statuses or current-slice pause fields.
+  - Documented pause-budget counters for consecutive and cumulative pauses.
   - Code constants/models support the new state without breaking old run files.
 - User-visible behaviour:
   - `status` and `summarize` can display paused/recovering information once later slices use it.
@@ -422,16 +481,20 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Functions/classes/components allowed to change:
   - Run status constants.
   - State load/write helpers.
+  - Locked state update or append-only event helper scaffolding.
   - Status/summarize display helpers.
   - Public exports for any new state helpers.
 - Tests allowed or expected to change:
   - Unit tests for backwards-compatible loading of old run state.
+  - Unit tests that append-only operational event writes do not rewrite unrelated `run.json` state.
+  - Unit tests that current-slice state records `before_head`.
   - Unit tests for rendering paused/recovering summary fields.
 
 ### Explicit Non-Goals
 - Do not add tmux observe/send commands yet.
 - Do not change slice execution control flow yet.
 - Do not implement operational event parsing yet.
+- Do not implement pause/retry policy yet.
 
 ### Risk Flags
 - Risky surfaces touched:
@@ -444,11 +507,15 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Tests to add/update:
   - Add tests for old run state without `supervision`.
   - Add tests for new paused state display.
+  - Add tests for append-only operational event writes.
+  - Add tests for persisted `current_slice.before_head`.
+  - Add tests for pause-budget counters.
 - Commands to run:
   - `python3 -m unittest skills.master-controller.tests.test_mc`
   - `git diff --check`
 - Manual checks:
   - Inspect `run-state-schema.md` examples for consistency with code constants.
+  - Confirm the state design avoids concurrent read-modify-write loss when `wait`, `send`, `finalize-slice`, and human `stop` run as separate processes.
 
 ### Rollback Path
 - Revert schema/model/state/status changes and associated tests.
@@ -464,10 +531,14 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Inputs:
   - Existing active run state.
   - Existing `TmuxHarnessAdapter.capture`, `detect_activity`, and session metadata.
+  - Existing ai-orchestrator helper patterns for wait/activity monitoring and literal tmux injection.
 - Outputs:
   - `mc.py observe --repo <path>` returns a structured snapshot.
-  - `mc.py send --repo <path> --text <text> --reason <reason>` sends text only to the active current slice session and records the action.
-  - Observation includes current time, elapsed time, pane text path, running/dead state, result-file existence, git status summary, and artifact paths.
+  - `mc.py send --repo <path> --text <text> --reason <reason>` sends text only to the active current slice session and records the action in the operational event log.
+  - `send` uses literal tmux input and the existing settle/double-submit discipline so it does not reproduce the known single-Enter prompt-submission race.
+  - `send` refuses when `observe` or the current pane text indicates a trust, approval, credential, permission, or external-side-effect prompt.
+  - Observation includes current time, elapsed time, pane text path, running/dead state, result-file existence, git status summary, prompt-on-screen hard-stop flags, and artifact paths.
+  - Implementation reuses or adapts existing `worker_jobs.py`, `ai-reminder`, and `TmuxHarnessAdapter` patterns where they already solve activity monitoring, transcript lookup, safe literal tmux injection, or prompt submission.
 - User-visible behaviour:
   - The MC model can inspect live state during a running slice without waiting for `run-next` to finish.
   - The MC model can send continuation prompts without manually composing tmux commands.
@@ -490,12 +561,14 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Functions/classes/components allowed to change:
   - CLI parser command registration.
   - Tmux adapter literal send helper.
+  - Tmux adapter prompt/trust guard reuse.
   - Observation serialization helper.
   - Operational event append helper.
 - Tests allowed or expected to change:
   - Unit tests for observe output with no current slice.
   - Unit tests for observe output with mocked tmux capture.
-  - Unit tests for send refusing no-current-slice and recording sent text for current slice.
+  - Unit tests for send refusing no-current-slice, refusing prompt-on-screen hard stops, and recording sent text for current slice.
+  - Unit tests proving `send` uses literal input and robust submit semantics.
 
 ### Explicit Non-Goals
 - Do not implement pause-until or long wait loops in this slice.
@@ -512,12 +585,16 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 ### Validation Plan
 - Tests to add/update:
   - Mocked adapter tests for literal send escaping and target restriction.
+  - Mocked adapter tests for trust/approval prompt refusal before sending.
+  - Regression test for the prompt-submission race that requires the robust submit path.
   - Runtime tmux smoke test if feasible, skipped when tmux is unavailable.
 - Commands to run:
   - `python3 -m unittest skills.master-controller.tests.test_mc`
   - `git diff --check`
 - Manual checks:
   - Verify `send` uses tmux literal input (`send-keys -l` or equivalent) and does not shell-evaluate user text.
+  - Verify `send` does not press Enter into a trust, approval, credential, permission, or external-side-effect prompt.
+  - Compare new observe/wait/send helpers against `worker_jobs.py`, `ai-reminder`, and existing `TmuxHarnessAdapter` logic and document why any duplicated logic is necessary.
   - Verify observation JSON is compact enough for the MC model to read repeatedly.
 
 ### Rollback Path
@@ -540,11 +617,12 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Existing gate verification in `gates.py`.
   - Existing artifact capture helpers.
 - Outputs:
-  - `start-slice` launches the next eligible slice, writes `current_slice`, sends the prompt, and returns control to the MC model.
+  - `start-slice` launches the next eligible slice, writes `current_slice` including `before_head`, sends the prompt, and returns control to the MC model.
   - `wait` observes for a bounded duration and returns when result appears, process exits, hard-stop hint appears, or wait expires.
-  - `pause-until` persists pause state and observes until a timestamp plus buffer.
-  - `finalize-slice` captures artifacts, runs existing gates, appends a slice entry, updates run status, and closes the session.
+  - `pause-until` persists pause state, enforces pause budgets, refuses deterministic hard-stop conditions, and observes until a timestamp plus buffer.
+  - `finalize-slice` captures artifacts, runs existing gates using persisted `before_head`, appends a slice entry, updates run status, and closes the session.
   - `stop-with-evidence` captures artifacts and records a structured stop reason without accepting the slice.
+  - Stale or orphaned sessions from interrupted model-supervised runs can be detected and reaped with evidence before a new slice starts.
 - User-visible behaviour:
   - A Mode C launcher can keep the MC model in a loop: start, observe/wait, decide, send, finalize, advance.
 - Behaviour that must not change:
@@ -560,7 +638,6 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - skills/master-controller/scripts/mc_lib/tmux_adapter.py
   - skills/master-controller/scripts/mc_lib/state.py
   - skills/master-controller/scripts/mc_lib/runtime.py
-  - skills/master-controller/scripts/mc_lib/gates.py
   - skills/master-controller/scripts/mc_lib/constants.py
   - skills/master-controller/scripts/mc_lib/__init__.py
   - skills/master-controller/references/run-state-schema.md
@@ -572,15 +649,20 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Extract reusable start/poll/capture/finalize helpers from `execute_slice`.
   - CLI command handlers for start/wait/pause/finalize/stop-with-evidence.
   - Run state status transitions.
+  - Stale session detection/reaping tied to the current run.
 - Tests allowed or expected to change:
   - Existing runtime tests must continue passing.
   - New fake harness tests for start/wait/finalize lifecycle.
   - New tests for pause-until state persistence.
+  - New tests that `finalize-slice` uses persisted `before_head` and does not guess `HEAD^`.
+  - New tests for repairable finalize results and repair-attempt caps.
+  - New tests for stale running session detection after an interrupted model-supervised run.
   - New tests for stop-with-evidence preserving pane and git evidence.
 
 ### Explicit Non-Goals
 - Do not make model calls from inside Python.
 - Do not accept any slice without existing deterministic gate verification.
+- Do not modify `gates.py`; this slice should reuse existing gate verification. If gate signatures must change, stop and create a narrower follow-up slice.
 - Do not remove `run-next` or `run --scope remaining`.
 
 ### Risk Flags
@@ -597,6 +679,9 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Toy harness start/wait/finalize pass.
   - Toy harness process-exit-without-result stop.
   - Pause-until with mocked time.
+  - Finalize with multiple commits in one slice to prove `before_head` is honored.
+  - Repairable result restart path within the configured attempt cap.
+  - Stale session reaper path.
   - Compatibility tests for existing run-next/run remaining.
 - Commands to run:
   - `python3 -m unittest skills.master-controller.tests.test_mc`
@@ -613,7 +698,8 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 ### Intended Change
 - Add lightweight deterministic hint extraction from pane/transcript text for common operational events.
 - Expose hints through `observe` and `wait`.
-- Keep hints advisory; the MC model remains responsible for deciding the action.
+- Keep ordinary hints advisory; the MC model remains responsible for deciding the action.
+- Enforce hard-stop hints as deterministic guards that prevent unattended pause/resume.
 
 ### Acceptance Criteria
 - Inputs:
@@ -623,14 +709,18 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Outputs:
   - Hints for rolling usage limits, weekly/monthly/account limits, service unavailable, network transient, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result.
   - Parse reset times/durations when explicit enough.
-  - Mark weekly/monthly/account limits as hard-stop hints.
-  - Mark unknown limit messages as ambiguous, not automatically recoverable.
+  - Mark weekly/monthly/account limits as hard-stop hints that `pause-until`, continuation `send`, and automatic retry/resume commands must refuse.
+  - Mark unknown limit messages as hard-stop or ambiguous, never automatically recoverable.
+  - Prefer relative reset durations over absolute local times; classify ambiguous absolute times as stop-for-user.
+  - Distinguish rolling-limit-with-live-process from rolling-limit-after-process-exit, because live sessions can receive a continuation prompt while exited sessions require restart-from-clean or user stop.
+  - Enforce pause budgets for maximum single pause, consecutive pauses, and cumulative paused time.
 - User-visible behaviour:
   - The MC model sees structured hints and evidence excerpts in observation output.
 - Behaviour that must not change:
   - Hints do not finalize gates.
   - Hints do not automatically authorize code changes.
   - Hints do not override approval-gated slices.
+  - Hard-stop hints prevent unattended pause/resume even if the MC model would otherwise choose to wait.
 
 ### Authorized Surface
 - Files allowed to change:
@@ -648,17 +738,21 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - New operational hint extraction helper.
   - Observation payload builder.
   - Time parsing helpers.
+  - Hard-stop guard helper shared by `pause-until`, `send`, and retry/resume paths.
 - Tests allowed or expected to change:
   - Unit tests for rolling limit with absolute time.
   - Unit tests for rolling limit with duration.
   - Unit tests for weekly/monthly/account hard-stop classification.
   - Unit tests for service-unavailable bounded retry hint.
   - Unit tests for ambiguous/unparseable messages.
+  - Unit tests for process-alive versus process-exited rolling-limit recovery guidance.
+  - Unit tests for pause-budget exhaustion.
 
 ### Explicit Non-Goals
 - Do not make the hint extractor a comprehensive natural-language decision engine.
 - Do not add network calls to verify service status.
 - Do not auto-wait from the deterministic `run --scope remaining` path unless separately documented and tested.
+- Do not permit any hard-stop hint to become an unattended wait, retry, resume, or continuation send.
 
 ### Risk Flags
 - Risky surfaces touched:
@@ -670,8 +764,11 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 ### Validation Plan
 - Tests to add/update:
   - Table-driven parser tests for representative Codex and Claude phrasing.
-  - Mock-time tests for local reset times around midnight.
-  - Tests that weekly/monthly/account limits never produce resumable wait actions.
+  - Mock-time tests for local reset times around midnight, including already-passed-today cases.
+  - Tests that weekly/monthly/account/unknown limits never produce resumable wait actions.
+  - Tests that relative durations are preferred when both duration and absolute time appear.
+  - Tests that exited-process rolling limits do not attempt to send into a dead session.
+  - Tests that pause-budget exhaustion stops for the user.
 - Commands to run:
   - `python3 -m unittest skills.master-controller.tests.test_mc`
   - `git diff --check`
@@ -697,7 +794,7 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Outputs:
   - Root `README.md` includes model-supervised Mode C launcher.
   - Launcher tells the MC model to observe tmux, reason from screen/log/json evidence, recover obvious bounded operational pauses, and stop on unclear or hard-stop conditions.
-  - Master-controller README includes a fake harness trial for usage-limit pause/resume.
+  - Master-controller README includes fake harness trials for live-session usage-limit pause/resume and exited-process usage-limit handling.
 - User-visible behaviour:
   - A fresh MC model receives enough instructions to act as the supervisor rather than outsourcing all live judgment to `mc.py run`.
 - Behaviour that must not change:
@@ -716,6 +813,7 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Documentation and tests for end-to-end supervision trial.
 - Tests allowed or expected to change:
   - Add or update fake harness tests to simulate operational pause and continuation.
+  - Add or update fake harness tests to simulate usage-limit process exit before result creation.
 
 ### Explicit Non-Goals
 - Do not add new runtime primitives in this slice.
@@ -732,11 +830,12 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 ### Validation Plan
 - Tests to add/update:
   - Fake harness usage-limit pause/resume test where feasible.
+  - Fake harness usage-limit process-exit test where feasible.
 - Commands to run:
   - `python3 -m unittest skills.master-controller.tests.test_mc`
   - `git diff --check`
 - Manual checks:
-  - Read the launcher prompt as a fresh MC model and confirm it includes: observe, decide, wait/retry, send continuation, finalize, advance, stop on weekly limits.
+  - Read the launcher prompt as a fresh MC model and confirm it includes: observe, decide, wait/retry, send continuation for live rolling-limit sessions, restart-or-stop handling for exited rolling-limit sessions, finalize, advance, and stop on weekly limits.
 
 ### Rollback Path
 - Revert README/SKILL/README trial updates and associated tests.
@@ -747,6 +846,7 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 - Audit MC docs and code comments for stale assumptions from the old fully blocking supervisor model.
 - Remove or rewrite wording that implies all timeouts are terminal, all sessions close after timeout, or pane text is never a basis for operational action.
 - Keep safety-critical wording that acceptance gates cannot rely on natural-language transcript interpretation alone.
+- Reconcile pre-existing adapter-contract drift, including method names and failure semantics that no longer match the current `TmuxHarnessAdapter`.
 
 ### Acceptance Criteria
 - Inputs:
@@ -756,6 +856,8 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - Docs consistently describe model-supervised and deterministic batch modes.
   - No stale command examples suggest the wrong mode for nuanced operational supervision.
   - Safety language is precise: screen text can guide operational triage, not acceptance.
+  - `harness-adapter-contract.md` matches the implemented adapter concepts or clearly marks aspirational/future contract items.
+  - The default operating path in `skills/master-controller/SKILL.md` no longer implies `run --scope remaining` is the only normal Mode C path when model judgment is desired.
 - User-visible behaviour:
   - Fresh users and agents do not receive contradictory MC instructions.
 - Behaviour that must not change:
@@ -769,7 +871,9 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - skills/master-controller/references/harness-adapter-contract.md
   - skills/master-controller/references/orchestrator-prompt.md
   - skills/master-controller/references/run-state-schema.md
-  - skills/master-controller/scripts/mc_lib/*.py
+  - skills/master-controller/scripts/mc_lib/tmux_adapter.py
+  - skills/master-controller/scripts/mc_lib/runner.py
+  - skills/master-controller/scripts/mc_lib/commands.py
   - skills/master-controller/tests/test_mc.py
 - Functions/classes/components allowed to change:
   - Documentation and comments.
@@ -785,9 +889,9 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
 ### Risk Flags
 - Risky surfaces touched:
   - Broad documentation consistency.
-  - Potential wildcard authorization for Python files.
+  - Comments in runtime modules that could be mistaken for behavior changes.
 - Approval needed before implementation:
-  - yes - broad cleanup surface; implementer should keep this slice tightly constrained.
+  - yes - broad cleanup surface; implementer should keep this slice tightly constrained and avoid runtime behaviour changes.
 
 ### Validation Plan
 - Tests to add/update:
@@ -797,6 +901,7 @@ Do not batch Slice 7 with earlier slices; it is a final cleanup and compatibilit
   - `git diff --check`
 - Manual checks:
   - Search for stale wording: `timeout`, `close the session`, `run --scope remaining`, `transcript interpretation`, `usage limit`, `reset`, `resume`, `continue`.
+  - Compare `harness-adapter-contract.md` against `TmuxHarnessAdapter` and either align the wording or label future-only adapter requirements.
   - Review every changed file for accidental behavioural edits.
 
 ### Rollback Path
@@ -814,12 +919,13 @@ The final launcher should direct the MC model to follow a loop like this:
 6. Observe immediately and record the tmux session/artifact paths.
 7. Repeatedly call `observe` or `wait` on a calm cadence.
 8. If the result appears, run `finalize-slice`.
-9. If pane/log evidence shows a rolling usage reset, compute reset plus buffer, call `pause-until`, then send the continuation prompt.
+9. If pane/log evidence shows a rolling usage reset and the harness process is still alive, compute reset plus buffer, call `pause-until`, re-observe for hard-stop prompts, then send the continuation prompt.
 10. If pane/log evidence shows a weekly/monthly/account cap, call `stop-with-evidence` and report.
-11. If pane/log evidence shows a bounded transient service problem, wait/retry within policy.
-12. If evidence is unclear, stop with evidence and report.
-13. After a finalized pass, advance to the next eligible slice.
-14. After any stop or completion, run summarize, inspect run state/artifacts, and report git status.
+11. If pane/log evidence shows a rolling usage reset but the harness process has exited before writing a result, restart only from a clean authorized state; otherwise call `stop-with-evidence`.
+12. If pane/log evidence shows a bounded transient service problem, wait/retry within policy.
+13. If evidence is unclear, stop with evidence and report.
+14. After a finalized pass, advance to the next eligible slice.
+15. After any stop or completion, run summarize, inspect run state/artifacts, and report git status.
 
 ## Next Chat Prompt
 
