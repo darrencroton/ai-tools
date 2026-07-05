@@ -158,7 +158,7 @@ State is stored under the target repository:
           orchestrator-result.json
 ```
 
-Target projects should usually add `.ai-mc/` to their own `.gitignore`, but MC does not edit `.gitignore` as part of initialization.
+MC does not edit the project's own `.gitignore`. Instead, `init` writes a self-ignoring `.ai-mc/.gitignore` containing `*`, so the audit directory — including seeded worker credentials and full transcripts — is never staged by a stray `git add -A`. MC's own dirty-tree and changed-file checks already exclude `.ai-mc/`.
 
 Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit.
 
@@ -176,7 +176,11 @@ MC expects implementation-plan slice sections with these headings:
 - `### Validation Plan`
 - `### Rollback Path`
 
-The parser fails closed when a required section is missing, when no files are listed under `Files allowed to change`, or when `Approval needed before implementation` is anything other than an explicit `no`.
+The parser fails closed when a required section is missing, when no files are listed under `Files allowed to change`, or when `Approval needed before implementation` is anything other than an exact `no` (a prefix like "not yet decided" or "none" is treated as unresolved, not as "no", and stops the run).
+
+Authorized file entries are matched with segment-aware globbing: a plain path matches exactly, a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
+
+The plan is frozen at `init` by content digest. If the plan file changes mid-run, MC stops before the next slice; a revised plan requires a fresh `init`. Duplicate `## Slice N:` numbers are rejected at `init`, and each runtime slice re-checks that the current branch still matches the branch captured at `init`.
 
 ## Safe Local Trial
 

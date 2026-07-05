@@ -85,6 +85,14 @@ Use this shape for every implementation slice:
 - ...
 ```
 
+## Machine-Consumed Fields
+
+`master-controller` parses these plan fields mechanically, so keep their labels and shapes exact:
+
+- Slice headings must be `## Slice <N>: <name>` with unique numbers, and each slice must include all seven `###` sections above verbatim.
+- `Files allowed to change:` must list each authorized path as an indented sub-bullet. Entries are matched segment-aware: a plain path matches exactly, a trailing `/` matches a directory subtree, and `*`/`?` match within one segment — use `**` for a recursive glob (`docs/**/*.md`).
+- `Approval needed before implementation:` must be an exact `no` to run unattended. Anything else (`yes`, `not yet decided`, `none`, blank) stops the run for a human.
+
 ## Output Rules
 
 - Keep plans specific to files, symbols, and observable behaviour.

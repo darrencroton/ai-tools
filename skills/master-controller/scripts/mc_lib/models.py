@@ -47,10 +47,14 @@ class PlanSlice:
     @property
     def authorized_files(self) -> list[str]:
         section = self.sections.get("Authorized Surface", "")
+        # Capture the lines under the "Files allowed to change:" line, stopping
+        # at the next column-0 bullet (a sibling such as "Functions.../Tests...",
+        # or any stray top-level bullet). Blank and indented lines are kept and
+        # then filtered by _bullet_values, so a stray sibling bullet cannot be
+        # mistaken for an authorized file while lenient spacing still parses.
         match = re.search(
-            r"Files allowed to change:\s*(?P<body>.*?)(?:\n-\s*Functions/classes/components allowed to change:|\n-\s*Tests allowed or expected to change:|\Z)",
+            r"Files allowed to change:[^\n]*\n(?P<body>(?:(?!-)[^\n]*\n?)*)",
             section,
-            flags=re.DOTALL,
         )
         if not match:
             return []
@@ -62,10 +66,16 @@ class PlanSlice:
         match = re.search(r"Approval needed before implementation:\s*(?P<value>[^\n]+)", section, flags=re.IGNORECASE)
         if not match:
             return None
-        value = match.group("value").strip().lower()
-        if value.startswith("no"):
+        # Match the answer exactly. A prefix test (startswith("no")) fails open:
+        # "not yet decided", "none", and "not required — ask first" all begin
+        # with "no" and would silently be treated as "no approval required",
+        # running unattended a slice a human explicitly left undecided. Anything
+        # that is not an unambiguous yes/no returns None, which eligibility()
+        # treats as blocking.
+        value = match.group("value").strip().lower().rstrip(".")
+        if value == "no":
             return False
-        if value.startswith("yes"):
+        if value == "yes":
             return True
         return None
 

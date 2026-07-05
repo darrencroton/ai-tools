@@ -32,7 +32,8 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
   },
   "plan": {
     "slice_count": 4,
-    "parser": "implementation-plan-markdown-v1"
+    "parser": "implementation-plan-markdown-v1",
+    "sha256": "<hex digest of the plan file at init>"
   },
   "current_slice": {
     "slice_id": "Slice 1",
@@ -58,6 +59,19 @@ Allowed run `status` values:
 - `complete`
 - `cancelled`
 
+## Run Integrity
+
+- `plan.sha256` freezes the plan file at init. Before each slice, MC re-hashes
+  the plan and stops with an error if it changed, so a mid-run plan edit cannot
+  silently alter authorization, ordering, or approval flags. A revised plan
+  requires a fresh `init`. Runs created before digests were recorded have no
+  baseline and skip this check.
+- Slice numbers must be unique; `init` fails closed on a duplicate `## Slice N:`
+  because completion tracking keys on the slice id.
+- MC assumes a single controller process per run directory. It does not lock
+  `run.json` or the `current` symlink; do not run two MC commands against the
+  same run concurrently.
+
 ## Slice Entry
 
 Runtime slices append entries to `slices`:
@@ -70,6 +84,7 @@ Runtime slices append entries to `slices`:
   "started_at": "2026-07-04T01:35:00Z",
   "completed_at": "2026-07-04T01:42:00Z",
   "artifact_dir": ".ai-mc/runs/20260704T013000Z/slices/slice-001",
+  "before_head": "<commit HEAD immediately before this slice ran, or null>",
   "changed_files": [],
   "validation": [],
   "drift_audit": {

@@ -4,6 +4,12 @@ MC sends a fresh prompt to the selected harness for each eligible slice. The pro
 
 ## Template
 
+> Editing note: MC renders the block below with Python `str.format`. The only
+> braces in it may be the `{placeholder}` fields listed in
+> `render_orchestrator_prompt`. Any other literal `{` or `}` (a JSON example, a
+> shell `${var}`) must be escaped as `{{`/`}}` or rendering will raise at
+> runtime.
+
 ```md
 You are the slice orchestrator for Master Controller.
 

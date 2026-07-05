@@ -7,9 +7,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .constants import KNOWN_UNATTENDED_HARNESS_COMMANDS, RUN_STOP_STATUSES
+from .constants import KNOWN_UNATTENDED_HARNESS_COMMANDS
 from .gates import verify_gate
-from .git_ops import git_head, git_status_text, require_clean_worktree, write_git_diff
+from .git_ops import git, git_head, git_status_text, require_clean_worktree, write_git_diff
 from .models import GateDecision, McError, PlanSlice
 from .plan import eligibility
 from .profiles import parse_worker_tools, resolve_harness_command
@@ -21,9 +21,25 @@ from .runtime import (
     slice_dir_name,
     tmux_session_name,
 )
-from .state import idle_status_after_pass, relative_artifact_path, slice_entry_from_gate, update_state_for_stop, write_run
+from .state import (
+    idle_status_after_pass,
+    normalize_stop_status,
+    relative_artifact_path,
+    slice_entry_from_gate,
+    update_state_for_stop,
+    write_run,
+)
 from .tmux_adapter import TmuxHarnessAdapter
 from .utils import utc_now
+
+
+def _capture_git_evidence(repo: Path, slice_artifact_dir: Path, attempt: int, before_head: str | None) -> tuple[str | None, str]:
+    after_head = git_head(repo)
+    after_status = git_status_text(repo)
+    (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
+    (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
+    write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+    return after_head, after_status
 
 
 def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_dir: Path) -> int:
@@ -43,6 +59,18 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         update_state_for_stop(run_json, state, "needs-human", str(exc))
         print(f"{plan_slice.slice_id} stopped: {exc}")
         return 2
+
+    # The branch is frozen at init; a slice must not commit onto a different
+    # branch than the run was started on (e.g. if a prior slice or the user
+    # switched branches). All of MC's other gates would still pass on the wrong
+    # branch, so this is checked explicitly.
+    current_branch = git(repo, "branch", "--show-current") or "DETACHED"
+    if current_branch != state.get("branch"):
+        reason = f"branch changed since init: expected {state.get('branch')!r}, found {current_branch!r}"
+        update_state_for_stop(run_json, state, "needs-human", reason)
+        print(f"{plan_slice.slice_id} stopped: {reason}")
+        return 2
+
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
     harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
@@ -59,25 +87,33 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
         encoding="utf-8",
     )
 
-    orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
-    adapter = TmuxHarnessAdapter(
-        harness_name,
-        resolve_harness_command(args, repo, state, orchestrator_session_id),
-        getattr(args, "allow_unattended_default", False),
-        configured_worker_tools,
-    )
-    if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
-        print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
-    if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
-        print(
-            f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
-            "(per-action approval is disabled; MC's post-hoc gates are the safety boundary for this run)"
-        )
     max_attempts = int(state.get("policy", {}).get("max_repair_attempts", 1)) + 1
     last_gate: GateDecision | None = None
+    slice_start_head: str | None = None
     for attempt in range(1, max_attempts + 1):
+        # A fresh session id per attempt: reusing one id across a repair retry
+        # would collide with the previous attempt's Claude session and clobber
+        # its transcript.
+        orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
+        adapter = TmuxHarnessAdapter(
+            harness_name,
+            resolve_harness_command(args, repo, state, orchestrator_session_id),
+            getattr(args, "allow_unattended_default", False),
+            configured_worker_tools,
+        )
+        if attempt == 1:
+            if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
+                print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
+            if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
+                print(
+                    f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
+                    "(per-action approval is disabled; MC's post-hoc gates are the safety boundary for this run)"
+                )
+
         started_at = utc_now()
         before_head = git_head(repo)
+        if attempt == 1:
+            slice_start_head = before_head
         before_status = git_status_text(repo)
         (slice_artifact_dir / f"git-status-before-attempt-{attempt}.txt").write_text(before_status, encoding="utf-8")
         (slice_artifact_dir / "git-status-before.txt").write_text(before_status, encoding="utf-8")
@@ -144,36 +180,28 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 adapter.request_stop(session_name)
                 time.sleep(min(float(args.poll_seconds), 1.0))
                 adapter.capture(session_name, slice_artifact_dir / "pane-capture-timeout.txt")
-                adapter.force_stop(session_name)
-                after_head = git_head(repo)
-                after_status = git_status_text(repo)
-                (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
-                (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
-                write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+                after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
                 last_gate = GateDecision("blocked", "timeout waiting for orchestrator-result.json")
             else:
-                adapter.force_stop(session_name)
-                after_head = git_head(repo)
-                after_status = git_status_text(repo)
-                (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
-                (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
-                write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
+                after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
                 last_gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
-        except McError as exc:
+        except Exception as exc:
+            # Any failure — an McError from the harness/tmux path or an
+            # unexpected exception — must not orphan the tmux session or leave
+            # run.json stuck at "running". Capture whatever evidence exists and
+            # record a failed gate so the run stops fail-closed. force_stop runs
+            # in the finally block below regardless of which path we took.
             adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt")
             capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
             capture_worker_runs_summary(slice_artifact_dir)
+            _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
+            last_gate = GateDecision("failed", str(exc) or repr(exc))
+        finally:
             adapter.force_stop(session_name)
-            after_head = git_head(repo)
-            after_status = git_status_text(repo)
-            (slice_artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
-            (slice_artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
-            write_git_diff(repo, before_head, after_head, slice_artifact_dir / "git-diff.patch")
-            last_gate = GateDecision("failed", str(exc))
 
         if last_gate.status == "repairable" and attempt < max_attempts:
             continue
-        entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, last_gate)
+        entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, last_gate, slice_start_head)
         state["slices"].append(entry)
         state["current_slice"] = None
         if last_gate.status == "pass":
@@ -182,10 +210,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             write_run(run_json, state)
             print(f"{plan_slice.slice_id} passed MC gates.")
             return 0
-        status_value = "failed" if last_gate.status == "fail" else last_gate.status
-        if status_value not in RUN_STOP_STATUSES:
-            status_value = "blocked"
-        update_state_for_stop(run_json, state, status_value, last_gate.reason)
+        update_state_for_stop(run_json, state, normalize_stop_status(last_gate.status), last_gate.reason)
         print(f"{plan_slice.slice_id} stopped: {last_gate.reason}")
         return 2
 

@@ -27,7 +27,16 @@ from .git_ops import (
     resolve_repo,
 )
 from .models import McError
-from .plan import completed_slice_ids, eligibility, next_slice, parse_plan, plan_slice_by_id
+from .plan import (
+    completed_slice_ids,
+    duplicate_slice_numbers,
+    eligibility,
+    next_slice,
+    parse_plan,
+    plan_digest,
+    plan_slice_by_id,
+    verify_plan_unchanged,
+)
 from .profiles import harness_supports_role, parse_worker_tools, profile_command, resolve_harness_command
 from .runtime import (
     capture_worker_runs_summary,
@@ -43,6 +52,7 @@ from .runner import execute_slice
 from .state import (
     idle_status_after_pass,
     load_run,
+    normalize_stop_status,
     previous_completed_head,
     relative_artifact_path,
     resolve_run_dir,
@@ -61,6 +71,13 @@ def init_run(args: argparse.Namespace) -> int:
     slices = parse_plan(plan)
     if not slices:
         raise McError("plan contains no slices")
+    duplicates = duplicate_slice_numbers(slices)
+    if duplicates:
+        raise McError(
+            "plan has duplicate slice numbers: "
+            + ", ".join(str(number) for number in duplicates)
+            + " (each slice number must be unique so completion tracking cannot silently skip work)"
+        )
     rid = run_id()
     mc_dir = repo / ".ai-mc"
     run_dir = mc_dir / "runs" / rid
@@ -69,6 +86,15 @@ def init_run(args: argparse.Namespace) -> int:
         suffix += 1
         run_dir = mc_dir / "runs" / f"{rid}-{suffix}"
     run_dir.mkdir(parents=True, exist_ok=False)
+
+    # MC keeps live worker credentials and full transcripts under .ai-mc/. It
+    # deliberately does not edit the project's own .gitignore, so it makes the
+    # audit directory self-ignoring instead: this keeps a stray `git add -A`
+    # from ever staging seeded auth material or transcripts. MC's own dirty-tree
+    # and changed-file checks already exclude .ai-mc/.
+    gitignore = mc_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("*\n", encoding="utf-8")
 
     branch = git(repo, "branch", "--show-current") or "DETACHED"
     worktree_root = Path(args.worktree_root).expanduser().resolve() if args.worktree_root else None
@@ -97,6 +123,7 @@ def init_run(args: argparse.Namespace) -> int:
         "plan": {
             "slice_count": len(slices),
             "parser": PARSER_NAME,
+            "sha256": plan_digest(plan),
         },
         "current_slice": None,
         "slices": [],
@@ -160,6 +187,7 @@ def run_next(args: argparse.Namespace) -> int:
     run_dir = resolve_run_dir(repo, args.run)
     state = load_run(run_dir)
     plan = resolve_plan(Path(state["plan_path"]))
+    verify_plan_unchanged(state, plan)
     slices = parse_plan(plan)
     if not slices:
         raise McError("plan contains no slices")
@@ -167,6 +195,10 @@ def run_next(args: argparse.Namespace) -> int:
     if candidate is None:
         print("No remaining slices.")
         return 0
+    if not args.dry_run:
+        # execute_slice owns the runtime eligibility gate and the stop-state
+        # write; run_next only reports for --dry-run.
+        return execute_slice(args, repo, state, candidate, run_dir)
     runnable, reasons = eligibility(candidate)
     print(f"Next slice: {candidate.slice_id} - {candidate.title}")
     if runnable:
@@ -174,14 +206,10 @@ def run_next(args: argparse.Namespace) -> int:
         print("Authorized files:")
         for path in candidate.authorized_files:
             print(f"- {path}")
-        if not args.dry_run:
-            return execute_slice(args, repo, state, candidate, run_dir)
         return 0
     print("Eligibility: blocked")
     for reason in reasons:
         print(f"- {reason}")
-    if not args.dry_run:
-        update_state_for_stop(run_dir / "run.json", state, "needs-human", "; ".join(reasons))
     return 2
 
 
@@ -231,7 +259,11 @@ def reconcile(args: argparse.Namespace) -> int:
     artifact_dir = Path(artifact_dir_value)
     if not artifact_dir.is_absolute():
         artifact_dir = repo / artifact_dir
-    before_head = previous_completed_head(state, slice_id)
+    # Prefer the boundary the slice actually recorded; only fall back to
+    # inference for entries written before before_head was tracked. Guessing
+    # HEAD^ misses a slice's earlier commits and can let an unauthorized file
+    # from a first commit escape the changed-file check.
+    before_head = entry.get("before_head") or previous_completed_head(state, slice_id)
     if before_head is None:
         parent = git_result(repo, "rev-parse", "HEAD^")
         before_head = parent.stdout.strip() if parent.returncode == 0 else None
@@ -239,7 +271,7 @@ def reconcile(args: argparse.Namespace) -> int:
     after_status = git_status_text(repo)
     capture_worker_runs_summary(artifact_dir)
     gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status)
-    reconciled_entry = slice_entry_from_gate(repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate)
+    reconciled_entry = slice_entry_from_gate(repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate, before_head)
     state["slices"][entry_index] = reconciled_entry
     state["current_slice"] = None
     if gate.status == "pass":
@@ -248,10 +280,7 @@ def reconcile(args: argparse.Namespace) -> int:
         write_run(run_json, state)
         print(f"{slice_id} reconciled and accepted: {gate.reason}")
         return 0
-    status_value = "failed" if gate.status == "fail" else gate.status
-    if status_value not in RUN_STOP_STATUSES:
-        status_value = "blocked"
-    state["status"] = status_value
+    state["status"] = normalize_stop_status(gate.status)
     state["stop_reason"] = gate.reason
     write_run(run_json, state)
     print(f"{slice_id} remains stopped: {gate.reason}")
@@ -323,6 +352,23 @@ def preflight(args: argparse.Namespace) -> int:
             check("profile command", False, str(exc))
     check("harness executable", shutil.which(executable) is not None, f"{executable}: {shutil.which(executable) or 'not found'}")
     check("harness orchestrator role", harness_supports_role(harness_name, "orchestrator"), harness_name)
+
+    # Resolve and preflight the exact launch command run-next would use, so
+    # preflight cannot pass a configuration the run then refuses (for example a
+    # bare interactive `codex`/`claude` that would deadlock without
+    # --allow-profile-command, --harness-command, or --allow-unattended-default).
+    try:
+        session_hint = "preflight-session" if harness_name == "claude" else None
+        launch_adapter = TmuxHarnessAdapter(
+            harness_name,
+            resolve_harness_command(args, repo, state, session_hint),
+            getattr(args, "allow_unattended_default", False),
+            parse_worker_tools(args.worker_tools),
+        )
+        launch_adapter.preflight()
+        check("harness launch resolves", True, launch_adapter.command)
+    except McError as exc:
+        check("harness launch resolves", False, str(exc))
 
     plan_path = resolve_plan(Path(state["plan_path"]))
     check("plan file", plan_path.exists(), str(plan_path))

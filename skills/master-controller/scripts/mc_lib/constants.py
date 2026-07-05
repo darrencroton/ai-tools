@@ -83,7 +83,7 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-SENSITIVE_ARTIFACT_NAMES = {"copilot-home", "codex-home", "claude-config-dir"}
+SENSITIVE_ARTIFACT_NAMES = {"copilot-home", "codex-home", "claude-config-dir", "tool-homes"}
 
 # Worker-tool home directories are not interchangeable: Copilot's real GitHub
 # credential lives outside ~/.copilot (gh CLI config / OS keychain), so

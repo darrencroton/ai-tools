@@ -1,11 +1,44 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
-from .models import PlanSlice
+from .models import McError, PlanSlice
 from .constants import COMPLETED_SLICE_STATUSES
+
+
+def plan_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def duplicate_slice_numbers(slices: list[PlanSlice]) -> list[int]:
+    counts: dict[int, int] = {}
+    for plan_slice in slices:
+        counts[plan_slice.number] = counts.get(plan_slice.number, 0) + 1
+    return sorted(number for number, count in counts.items() if count > 1)
+
+
+def verify_plan_unchanged(state: dict[str, Any], plan_path: Path) -> None:
+    """Fail closed if the plan file changed since the run was initialized.
+
+    A "frozen" contract that is silently re-read on every slice is not frozen:
+    editing the plan mid-run (renumbering slices, widening an authorized
+    surface, flipping an approval flag) would otherwise be honored on the next
+    slice. Runs created before digests were recorded have no baseline and are
+    skipped for backward compatibility.
+    """
+    recorded = state.get("plan", {}).get("sha256")
+    if not recorded:
+        return
+    current = plan_digest(plan_path)
+    if current != recorded:
+        raise McError(
+            "plan file changed since this run was initialized "
+            f"(recorded sha256 {recorded[:12]}…, current {current[:12]}…); "
+            "start a new MC run for a revised plan"
+        )
 
 
 def parse_plan(path: Path) -> list[PlanSlice]:

@@ -4,12 +4,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .constants import COMPLETED_SLICE_STATUSES
+from .constants import COMPLETED_SLICE_STATUSES, RUN_STOP_STATUSES
 from .git_ops import git_result
 from .models import GateDecision, McError, PlanSlice
 from .plan import completed_slice_ids
 from .runtime import relative_artifact_path
 from .utils import utc_now
+
+
+def normalize_stop_status(gate_status: str) -> str:
+    """Map a non-passing gate status onto an allowed run stop status."""
+    status_value = "failed" if gate_status == "fail" else gate_status
+    return status_value if status_value in RUN_STOP_STATUSES else "blocked"
 
 
 def load_run(run_path: Path) -> dict[str, Any]:
@@ -54,7 +60,14 @@ def idle_status_after_pass(state: dict[str, Any]) -> str:
     return "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "partial"
 
 
-def slice_entry_from_gate(repo: Path, plan_slice: PlanSlice, slice_artifact_dir: Path, started_at: str, gate: GateDecision) -> dict[str, Any]:
+def slice_entry_from_gate(
+    repo: Path,
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    started_at: str,
+    gate: GateDecision,
+    before_head: str | None = None,
+) -> dict[str, Any]:
     result = gate.result or {}
     return {
         "slice_id": plan_slice.slice_id,
@@ -63,6 +76,10 @@ def slice_entry_from_gate(repo: Path, plan_slice: PlanSlice, slice_artifact_dir:
         "started_at": started_at,
         "completed_at": utc_now(),
         "artifact_dir": relative_artifact_path(repo, slice_artifact_dir),
+        # The commit HEAD immediately before this slice's work started. reconcile
+        # uses it to recompute changed files against the exact slice boundary
+        # instead of guessing HEAD^ (which misses a slice's earlier commits).
+        "before_head": before_head,
         "changed_files": list(gate.actual_changed_files or tuple(result.get("changed_files") or ())),
         "validation": result.get("validation", []),
         "drift_audit": result.get("drift_audit", {"verdict": None, "path": ""}),

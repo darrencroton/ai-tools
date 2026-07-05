@@ -1,3 +1,11 @@
+"""Master Controller library.
+
+The public surface is enumerated explicitly (rather than re-exported with
+`import *`) so the package namespace stays deliberate and cannot silently leak
+stdlib names or mask a future collision. `scripts/mc.py` and the test suite
+consume names from this surface.
+"""
+
 from __future__ import annotations
 
 from .cli import build_parser, main
@@ -15,15 +23,209 @@ from .commands import (
     stop,
     summarize,
 )
+from .constants import (
+    COMPLETED_SLICE_STATUSES,
+    DEFAULT_POLL_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
+    FULL_COMMIT_RE,
+    HARNESS_PROFILES,
+    KNOWN_UNATTENDED_HARNESS_COMMANDS,
+    ORCHESTRATOR_STATUSES,
+    PARSER_NAME,
+    REQUIRED_SECTIONS,
+    RUN_STOP_STATUSES,
+    SCHEMA_VERSION,
+    SENSITIVE_ARTIFACT_NAMES,
+    WORKER_CREDENTIAL_HOMES,
+)
+from .gates import (
+    artifact_exists,
+    load_orchestrator_result,
+    object_field,
+    verify_gate,
+    write_orchestrator_result,
+    write_reconciliation_artifact,
+)
+from .git_ops import (
+    changed_files_between,
+    commit_is_descendant,
+    git,
+    git_access_path,
+    git_head,
+    git_result,
+    git_status_text,
+    is_authorized_path,
+    is_full_commit_hash,
+    meaningful_status_lines,
+    normalize_authorized_entry,
+    require_clean_worktree,
+    resolve_plan,
+    resolve_repo,
+    status_changed_files,
+    status_path,
+    unauthorized_files,
+    write_git_diff,
+)
+from .models import CommandResult, GateDecision, McError, PlanSlice
+from .plan import (
+    completed_slice_ids,
+    duplicate_slice_numbers,
+    eligibility,
+    next_slice,
+    parse_plan,
+    parse_sections,
+    plan_digest,
+    plan_slice_by_id,
+    verify_plan_unchanged,
+)
+from .process import run_command
+from .profiles import (
+    harness_supports_role,
+    parse_worker_tools,
+    profile_command,
+    resolve_harness_command,
+)
 from .runner import execute_slice
-from .constants import *
-from .gates import *
-from .git_ops import *
-from .models import *
-from .plan import *
-from .process import *
-from .profiles import *
-from .runtime import *
-from .state import *
-from .tmux_adapter import TmuxHarnessAdapter
-from .utils import *
+from .runtime import (
+    capture_orchestrator_transcript,
+    capture_worker_runs_summary,
+    claude_orchestrator_transcript_path,
+    ensure_slice_runtime_dirs,
+    environment_preflight,
+    load_prompt_template,
+    real_tool_home,
+    relative_artifact_path,
+    render_orchestrator_prompt,
+    result_schema_path,
+    seed_worker_credentials,
+    sensitive_artifact_dirs,
+    skill_root,
+    slice_dir_name,
+    slice_environment,
+    slice_paths,
+    tmux_session_name,
+    worker_credential_source,
+    worker_jobs_module,
+    worker_jobs_path,
+)
+from .state import (
+    idle_status_after_pass,
+    load_run,
+    normalize_stop_status,
+    previous_completed_head,
+    resolve_run_dir,
+    resolve_run_path,
+    run_json_path,
+    slice_entry_from_gate,
+    update_state_for_stop,
+    write_run,
+)
+from .tmux_adapter import TRUST_PROMPT_MARKERS, TmuxHarnessAdapter
+from .utils import run_id, utc_now
+
+__all__ = [
+    "TRUST_PROMPT_MARKERS",
+    "TmuxHarnessAdapter",
+    "COMPLETED_SLICE_STATUSES",
+    "CommandResult",
+    "DEFAULT_POLL_SECONDS",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "FULL_COMMIT_RE",
+    "GateDecision",
+    "HARNESS_PROFILES",
+    "KNOWN_UNATTENDED_HARNESS_COMMANDS",
+    "McError",
+    "ORCHESTRATOR_STATUSES",
+    "PARSER_NAME",
+    "PlanSlice",
+    "REQUIRED_SECTIONS",
+    "RUN_STOP_STATUSES",
+    "SCHEMA_VERSION",
+    "SENSITIVE_ARTIFACT_NAMES",
+    "WORKER_CREDENTIAL_HOMES",
+    "archive_sensitive",
+    "artifact_exists",
+    "build_parser",
+    "capture_orchestrator_transcript",
+    "capture_worker_runs_summary",
+    "changed_files_between",
+    "claude_orchestrator_transcript_path",
+    "commit_is_descendant",
+    "completed_slice_ids",
+    "duplicate_slice_numbers",
+    "eligibility",
+    "ensure_slice_runtime_dirs",
+    "environment_preflight",
+    "execute_slice",
+    "git",
+    "git_access_path",
+    "git_head",
+    "git_result",
+    "git_status_text",
+    "harness_supports_role",
+    "idle_status_after_pass",
+    "init_run",
+    "is_authorized_path",
+    "is_full_commit_hash",
+    "list_profiles",
+    "load_orchestrator_result",
+    "load_prompt_template",
+    "load_run",
+    "main",
+    "meaningful_status_lines",
+    "nearest_existing_parent",
+    "next_slice",
+    "normalize_authorized_entry",
+    "normalize_stop_status",
+    "object_field",
+    "parse_plan",
+    "parse_sections",
+    "parse_worker_tools",
+    "plan_digest",
+    "plan_slice_by_id",
+    "preflight",
+    "previous_completed_head",
+    "print_check",
+    "profile_command",
+    "real_tool_home",
+    "reconcile",
+    "relative_artifact_path",
+    "render_orchestrator_prompt",
+    "require_clean_worktree",
+    "resolve_harness_command",
+    "resolve_plan",
+    "resolve_repo",
+    "resolve_run_dir",
+    "resolve_run_path",
+    "result_schema_path",
+    "run_command",
+    "run_id",
+    "run_json_path",
+    "run_next",
+    "run_remaining",
+    "seed_worker_credentials",
+    "sensitive_artifact_dirs",
+    "skill_root",
+    "slice_dir_name",
+    "slice_entry_from_gate",
+    "slice_environment",
+    "slice_paths",
+    "status",
+    "status_changed_files",
+    "status_path",
+    "stop",
+    "summarize",
+    "tmux_session_name",
+    "unauthorized_files",
+    "update_state_for_stop",
+    "utc_now",
+    "verify_gate",
+    "verify_plan_unchanged",
+    "worker_credential_source",
+    "worker_jobs_module",
+    "worker_jobs_path",
+    "write_git_diff",
+    "write_orchestrator_result",
+    "write_reconciliation_artifact",
+    "write_run",
+]

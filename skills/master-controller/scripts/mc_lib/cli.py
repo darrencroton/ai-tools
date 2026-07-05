@@ -73,9 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser = subparsers.add_parser("preflight", help="check the next MC slice launch before running it")
     add_repo_run_args(preflight_parser)
     add_harness_args(preflight_parser)
+    add_unattended_default_arg(preflight_parser)
     preflight_parser.set_defaults(func=preflight)
 
-    run_next_parser = subparsers.add_parser("run-next", help="inspect the next slice")
+    run_next_parser = subparsers.add_parser("run-next", help="inspect the next slice, or run it unless --dry-run is set")
     add_repo_run_args(run_next_parser)
     run_next_parser.add_argument("--dry-run", action="store_true", help="only report next-slice eligibility")
     add_runtime_args(run_next_parser)

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import fnmatch
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .constants import FULL_COMMIT_RE
 from .models import CommandResult, McError
@@ -37,6 +36,11 @@ def git_status_text(repo: Path) -> str:
 
 
 def status_path(line: str) -> str:
+    # Note: git quotes paths with unusual characters (non-ASCII, embedded
+    # quotes) and C-style escapes them. MC strips the surrounding quotes but
+    # does not unescape, so such a path won't string-match the authorized entry
+    # and the slice fails closed at the gate — the safe direction, if slightly
+    # opaque, for the rare repos that hit it.
     path = line[3:] if len(line) > 3 else line
     if " -> " in path:
         path = path.rsplit(" -> ", 1)[1]
@@ -78,7 +82,14 @@ def write_git_diff(repo: Path, before_head: str | None, after_head: str | None, 
         result = git_result(repo, "diff", "--binary", before_head, after_head)
     else:
         result = git_result(repo, "diff", "--binary")
-    destination.write_text(result.stdout if result.returncode == 0 else result.stderr, encoding="utf-8")
+    if result.returncode == 0:
+        destination.write_text(result.stdout, encoding="utf-8")
+    else:
+        # Keep the patch file a valid (empty) diff and record the failure
+        # separately, so the artifact is never a diff-shaped file that is
+        # actually a git error message.
+        destination.write_text("", encoding="utf-8")
+        (destination.parent / "git-diff-error.txt").write_text(result.stderr, encoding="utf-8")
 
 
 def is_full_commit_hash(value: str | None) -> bool:
@@ -105,7 +116,12 @@ def is_authorized_path(path: str, authorized_entries: list[str]) -> bool:
             if path.startswith(entry):
                 return True
         elif any(marker in entry for marker in ("*", "?", "[")):
-            if fnmatch.fnmatch(path, entry):
+            # PurePosixPath.full_match is path-segment aware: a single "*" does
+            # not cross "/", so an authorized entry of "*.md" matches only
+            # top-level markdown, not "deep/nested/anything.md". Authors who
+            # want a recursive match write "**/*.md" explicitly. fnmatch would
+            # silently widen the one gate MC computes itself.
+            if PurePosixPath(path).full_match(entry):
                 return True
         elif path == entry:
             return True

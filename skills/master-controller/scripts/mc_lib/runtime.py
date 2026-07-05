@@ -186,6 +186,12 @@ def slice_environment(
 
 
 def load_prompt_template() -> str:
+    # The extracted template is rendered with str.format in
+    # render_orchestrator_prompt, so any literal `{`/`}` added to the template
+    # block in references/orchestrator-prompt.md (a JSON example, a shell
+    # `${var}`) would raise at runtime. Keep placeholders as the only braces in
+    # that block, or escape literals as `{{`/`}}`. The template file carries the
+    # same warning for editors.
     path = skill_root() / "references" / "orchestrator-prompt.md"
     text = path.read_text(encoding="utf-8")
     match = re.search(r"```md\n(?P<template>.*?)\n```", text, flags=re.DOTALL)

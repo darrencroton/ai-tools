@@ -63,6 +63,8 @@ MC must stop on:
 
 MC decisions must not rely only on natural-language transcript interpretation. The orchestrator must produce `orchestrator-result.json`, and MC must verify claims against local evidence.
 
+Trust boundary for audit verdicts: MC recomputes the highest-risk gate itself — the set of changed files against the authorized surface, using segment-aware matching so `*.md` does not cross directory boundaries — and it independently verifies commit ancestry, HEAD advancement, and a clean post-commit worktree. For the drift-audit and code-review gates, MC verifies the reported verdict string plus the existence of a non-empty artifact file inside the run; it does not re-derive those verdicts from the transcript. A dishonest orchestrator that both writes `"verdict": "PASS"` and fabricates a non-empty artifact is therefore outside what MC detects, by design. The mitigation is that the file-level authorization gate — the change most likely to cause real harm — is always MC's own computation, never the orchestrator's claim.
+
 ## Relationship To Other Skills
 
 - `implementation-plan`: produces the plan MC consumes. MC does not plan.

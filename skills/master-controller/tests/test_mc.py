@@ -22,6 +22,8 @@ sys.modules[SPEC.name] = mc
 SPEC.loader.exec_module(mc)
 from mc_lib import runtime as mc_runtime  # noqa: E402
 from mc_lib import tmux_adapter as mc_tmux_adapter  # noqa: E402
+from mc_lib import commands as mc_commands  # noqa: E402
+from mc_lib import runner as mc_runner  # noqa: E402
 
 
 def git(repo, *args):
@@ -956,6 +958,265 @@ Continue later.
             with contextlib.redirect_stdout(output):
                 mc.preflight(preflight_args)
         self.assertNotIn("codex worker credential source", output.getvalue())
+
+
+    # --- Review fixes: fail-closed parsing -------------------------------
+
+    def test_approval_free_text_blocks(self):
+        for value in ["not yet decided", "none", "maybe later"]:
+            write_plan(self.plan, approval=value)
+            plan_slice = mc.parse_plan(self.plan)[0]
+            self.assertIsNone(plan_slice.approval_needed, value)
+            runnable, reasons = mc.eligibility(plan_slice)
+            self.assertFalse(runnable, value)
+            self.assertIn("approval-needed risk flag is missing or unclear", reasons)
+
+    def test_approval_exact_no_runs(self):
+        write_plan(self.plan, approval="no")
+        self.assertFalse(mc.parse_plan(self.plan)[0].approval_needed)
+
+    def test_authorized_files_ignores_stray_bullet(self):
+        plan_slice = mc.PlanSlice(
+            1,
+            "t",
+            "",
+            {
+                "Authorized Surface": (
+                    "- Files allowed to change:\n"
+                    "  - README.md\n"
+                    "- Note: be careful in this area\n"
+                    "- Tests allowed or expected to change: none."
+                )
+            },
+        )
+        self.assertEqual(plan_slice.authorized_files, ["README.md"])
+
+    def test_is_authorized_path_glob_is_segment_aware(self):
+        self.assertTrue(mc.is_authorized_path("a.md", ["*.md"]))
+        self.assertFalse(mc.is_authorized_path("deep/a.md", ["*.md"]))
+        self.assertTrue(mc.is_authorized_path("deep/a.md", ["**/*.md"]))
+        self.assertTrue(mc.is_authorized_path("src/a.py", ["src/*.py"]))
+        self.assertFalse(mc.is_authorized_path("src/deep/a.py", ["src/*.py"]))
+
+    # --- Review fixes: fail-closed gate ----------------------------------
+
+    def _commit_readme_change(self):
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        return before, git(self.repo, "rev-parse", "HEAD")
+
+    def test_gate_fails_closed_on_string_validation_entry(self):
+        self.prepare_committed_repo()
+        before, after = self._commit_readme_change()
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result_data(
+            artifact,
+            {
+                "schema_version": 1,
+                "slice_id": "Slice 1",
+                "status": "pass",
+                "summary": "",
+                "changed_files": ["README.md"],
+                "validation": ["git diff --check ran fine"],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": True, "created": True, "hash": after},
+                "next_action": "",
+                "blockers": [],
+            },
+        )
+        state = self.init_run()
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("validation entries are malformed", decision.reason)
+
+    def test_gate_fails_closed_on_string_changed_files(self):
+        self.prepare_committed_repo()
+        before, after = self._commit_readme_change()
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result_data(
+            artifact,
+            {
+                "schema_version": 1,
+                "slice_id": "Slice 1",
+                "status": "pass",
+                "summary": "",
+                "changed_files": "README.md",
+                "validation": [{"command": "test", "result": "pass", "notes": ""}],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": True, "created": True, "hash": after},
+                "next_action": "",
+                "blockers": [],
+            },
+        )
+        state = self.init_run()
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("changed_files is malformed", decision.reason)
+
+    def test_artifact_exists_requires_nonempty_in_tree_file(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        (artifact / "drift-audit.md").write_text("", encoding="utf-8")
+        self.assertFalse(mc.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
+        (artifact / "drift-audit.md").write_text("verdict\n", encoding="utf-8")
+        self.assertTrue(mc.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
+        # An existing file outside the run must not satisfy the evidence check.
+        self.assertFalse(
+            mc.artifact_exists(self.repo, artifact, {"drift_audit": {"path": sys.executable}}, "drift_audit", "drift-audit.md")
+        )
+
+    # --- Review fixes: run integrity -------------------------------------
+
+    def test_init_writes_self_ignoring_gitignore(self):
+        self.init_run()
+        gitignore = self.repo / ".ai-mc" / ".gitignore"
+        self.assertTrue(gitignore.exists())
+        self.assertEqual(gitignore.read_text(encoding="utf-8"), "*\n")
+
+    def test_init_records_plan_digest(self):
+        state = self.init_run()
+        self.assertEqual(state["plan"]["sha256"], mc.plan_digest(self.plan))
+
+    def test_verify_plan_unchanged_stops_on_edit(self):
+        state = self.init_run()
+        self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
+        with self.assertRaisesRegex(mc.McError, "plan file changed"):
+            mc.verify_plan_unchanged(state, self.plan)
+
+    def test_init_rejects_duplicate_slice_numbers(self):
+        dup = self.repo / "dup.md"
+        dup.write_text("# Plan\n\n## Slice 1: A\n\n## Slice 1: B\n", encoding="utf-8")
+        args = argparse.Namespace(repo=str(self.repo), plan=str(dup), harness="codex", worktree_root=None)
+        with self.assertRaisesRegex(mc.McError, "duplicate slice numbers"):
+            mc.init_run(args)
+
+    def test_tool_homes_marked_sensitive(self):
+        self.assertIn("tool-homes", mc.SENSITIVE_ARTIFACT_NAMES)
+
+    def test_run_next_stops_when_branch_changed(self):
+        self.prepare_committed_repo()
+        self.init_run()
+        git(self.repo, "checkout", "-b", "unexpected-branch")
+        run_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=1,
+            poll_seconds=0.1,
+            harness_command=None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(run_args), 2)
+        state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("branch changed since init", state["stop_reason"])
+
+    def test_normalize_stop_status_maps_fail_and_unknown(self):
+        self.assertEqual(mc.normalize_stop_status("fail"), "failed")
+        self.assertEqual(mc.normalize_stop_status("weird"), "blocked")
+        self.assertEqual(mc.normalize_stop_status("needs-human"), "needs-human")
+        self.assertEqual(mc.normalize_stop_status("blocked"), "blocked")
+
+    def test_slice_entry_records_before_head(self):
+        gate = mc.GateDecision("pass", "ok", {"changed_files": []}, ())
+        entry = mc.slice_entry_from_gate(self.repo, mc.parse_plan(self.plan)[0], self.repo / "art", "2026-01-01T00:00:00Z", gate, "abc123")
+        self.assertEqual(entry["before_head"], "abc123")
+
+    def test_reconcile_uses_recorded_before_head(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["slices"].append(
+            {
+                "slice_id": "Slice 1",
+                "title": "First Slice",
+                "status": "fail",
+                "started_at": "2026-01-01T00:00:00Z",
+                "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+                "before_head": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "commit": {"requested": True, "created": True, "hash": "0" * 40},
+            }
+        )
+        state["status"] = "failed"
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        captured = {}
+
+        def fake_gate(repo, run_state, plan_slice, art, before, after, status):
+            captured["before"] = before
+            return mc.GateDecision("fail", "still bad", {"changed_files": []}, ())
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with mock.patch.object(mc_commands, "verify_gate", fake_gate):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.reconcile(args), 2)
+        self.assertEqual(captured["before"], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+    # --- Review fixes: harness readiness / launch parity -----------------
+
+    def test_claude_readiness_blocks_on_trust_prompt(self):
+        adapter = mc.TmuxHarnessAdapter("claude", "claude")
+        calls = [
+            mc.CommandResult(0, "", ""),  # session_exists
+            mc.CommandResult(0, "Do you trust the files in this folder?", ""),  # pane capture
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep"):
+            with self.assertRaisesRegex(mc.McError, "trust prompt"):
+                adapter._wait_claude_ready("session")
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for preflight parity test")
+    def test_preflight_flags_bare_interactive_harness(self):
+        self.prepare_committed_repo()
+        self.init_run()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(mc.preflight(args), 2)
+        self.assertIn("harness launch resolves", output.getvalue())
+        self.assertIn("deadlock", output.getvalue())
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_blocks_on_unexpected_gate_exception(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "fake_harness.py"
+        write_fake_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        run_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=10,
+            poll_seconds=0.1,
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+        )
+        with mock.patch.object(mc_runner, "verify_gate", side_effect=ValueError("boom")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.run_next(run_args), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("boom", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+
+    # --- Cross-skill dependency contract ---------------------------------
+
+    def test_worker_jobs_module_exposes_claude_project_root(self):
+        module = mc.worker_jobs_module()
+        self.assertTrue(hasattr(module, "claude_project_root"))
 
 
 if __name__ == "__main__":

@@ -4,11 +4,23 @@ import shlex
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 from .constants import KNOWN_UNATTENDED_HARNESS_COMMANDS
 from .models import McError, PlanSlice
 from .process import run_command
 from .runtime import slice_environment
+
+
+# Directory-trust / folder-trust dialogs from the interactive TUIs. If any of
+# these is on screen when MC is about to submit, a blind Enter would confirm it
+# (for example auto-trusting a directory) — exactly the kind of side effect MC
+# must not cause. Detecting them lets MC fail closed instead.
+TRUST_PROMPT_MARKERS = (
+    "Do you trust the contents of this directory",
+    "Do you trust the files in this folder",
+    "Do you trust the files in this directory",
+)
 
 
 class TmuxHarnessAdapter:
@@ -82,24 +94,66 @@ class TmuxHarnessAdapter:
             error_prefix="tmux start failed",
         )
 
+    def _pane_text(self, session_name: str) -> str:
+        result = run_command(["tmux", "capture-pane", "-p", "-S", "-200", "-t", session_name], allow_failure=True)
+        return result.stdout if result.returncode == 0 else ""
+
+    @staticmethod
+    def _raise_on_trust_prompt(executable: str, capture: str) -> None:
+        for marker in TRUST_PROMPT_MARKERS:
+            if marker in capture:
+                raise McError(
+                    f"{executable} directory trust prompt blocked unattended launch; trust the repo before running MC"
+                )
+
     def wait_until_prompt_ready(self, session_name: str) -> None:
         command_parts = shlex.split(self.command) if self.command.strip() else []
         executable = Path(command_parts[0]).name if command_parts else ""
-        if executable != "codex":
-            return
+        if executable == "codex":
+            self._wait_codex_ready(session_name)
+        elif executable == "claude":
+            self._wait_claude_ready(session_name)
+        # Any other executable (a custom --harness-command, a non-TUI harness)
+        # has no interactive readiness handshake to perform.
+
+    def _wait_codex_ready(self, session_name: str) -> None:
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             if not self.session_exists(session_name):
                 raise McError("codex session exited before the prompt could be sent")
-            result = run_command(["tmux", "capture-pane", "-p", "-S", "-200", "-t", session_name], allow_failure=True)
-            capture = result.stdout if result.returncode == 0 else ""
-            if "Do you trust the contents of this directory" in capture:
-                raise McError("codex directory trust prompt blocked unattended launch; trust the repo before running MC")
+            capture = self._pane_text(session_name)
+            self._raise_on_trust_prompt("codex", capture)
             if "OpenAI Codex" in capture and "›" in capture:
                 time.sleep(0.5)
                 return
             time.sleep(0.25)
         raise McError("codex TUI did not become ready for prompt injection")
+
+    def _wait_claude_ready(self, session_name: str) -> None:
+        # Claude Code has no single stable "ready" banner MC can key on, so
+        # readiness is inferred from the TUI finishing its draw (non-empty pane
+        # unchanged across a short window). A directory-trust dialog is caught
+        # explicitly and fails closed. Reaching the deadline still returns:
+        # send_prompt's settle-and-double-submit is the backstop, and any trust
+        # dialog would have appeared (and been caught) well before then.
+        deadline = time.monotonic() + 20.0
+        previous = ""
+        stable_since: float | None = None
+        while time.monotonic() < deadline:
+            if not self.session_exists(session_name):
+                raise McError("claude session exited before the prompt could be sent")
+            capture = self._pane_text(session_name)
+            self._raise_on_trust_prompt("claude", capture)
+            if capture.strip() and capture == previous:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= 1.5:
+                    time.sleep(0.5)
+                    return
+            else:
+                stable_since = None
+            previous = capture
+            time.sleep(0.25)
 
     def send_prompt(self, session_name: str, prompt_path: Path) -> None:
         buffer_name = f"{session_name}_prompt"
