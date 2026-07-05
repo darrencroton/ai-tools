@@ -70,10 +70,10 @@ def artifact_exists(repo: Path, slice_artifact_dir: Path, result: dict[str, Any]
     """Return True only for a real, non-empty evidence file inside the run.
 
     A verdict string in orchestrator-result.json is not enough on its own: MC
-    also requires the named artifact to exist as a non-empty file that lives
-    under the slice artifact directory or the repo. That stops a result from
+    also requires the named artifact to exist as a non-empty file that resolves
+    under the slice artifact directory. That stops a result from
     satisfying the gate by pointing `path` at an arbitrary existing file (for
-    example `/etc/hosts`) or at an empty placeholder.
+    example `/etc/hosts` or `README.md`) or at an empty placeholder.
     """
     configured = result.get(field, {}).get("path") if isinstance(result.get(field), dict) else None
     if not configured:
@@ -88,7 +88,7 @@ def artifact_exists(repo: Path, slice_artifact_dir: Path, result: dict[str, Any]
             non_empty = candidate.stat().st_size > 0
         except OSError:
             continue
-        if non_empty and (_within(candidate, slice_artifact_dir) or _within(candidate, repo)):
+        if non_empty and _within(candidate, slice_artifact_dir):
             return True
     return False
 

@@ -106,31 +106,31 @@ When all slices are complete, write a final summary: slices committed, gate resu
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
 
-**MC workflow — external supervisor.** Use `master-controller` when the plan is complete and you want a local controller to run eligible slices through a fresh tmux-backed harness session with durable artifacts and gate verification:
+**Mode C — Run through MC.** Use `master-controller` when the plan is complete and you want the Mode A slice-by-slice workflow managed by an outside controller instead of by repeated human prompts. MC keeps durable state, starts each eligible slice in a fresh harness session, verifies the gates from outside that session, commits only slices that pass validation, drift audit, and code review, and stops for you on approval-gated work or anything outside policy:
 
-```bash
-python3 skills/master-controller/scripts/mc.py init \
-  --repo /path/to/repo \
-  --plan /path/to/plan.md \
-  --harness codex
+```md
+Plan file: <path>
+Target repo: <path>
+Scope: <one slice, next slice, or all remaining slices>
+Harness: codex unless I specify otherwise.
+Worker tools: <omit unless the plan requires external workers, e.g. copilot>
 
-python3 skills/master-controller/scripts/mc.py preflight \
-  --repo /path/to/repo \
-  --worker-tools copilot \
-  --allow-profile-command
+Use master-controller as the supervising skill for this run.
 
-python3 skills/master-controller/scripts/mc.py run-next --repo /path/to/repo --dry-run
-python3 skills/master-controller/scripts/mc.py run \
-  --repo /path/to/repo \
-  --scope remaining \
-  --worker-tools copilot \
-  --allow-profile-command
-python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
+Read the full plan file first. If the plan is incomplete, ambiguous, not an implementation-plan output, or needs material editing, stop and report instead of improvising.
+
+Use the current feature branch unless I explicitly name another branch. Confirm the target repo, plan file, branch, scope, harness, and worker tools before starting runtime execution.
+
+Initialize or reuse the MC run for this repo and plan, then run preflight, dry-run the next slice, and run the requested scope. Use MC profiles for normal local execution; do not ask me to hand-compose Codex or Claude sandbox flags.
+
+For each eligible slice, let MC launch a fresh orchestrator session, enforce the frozen authorized surface, require validation, drift-audit, code-review, and commit evidence, and advance only when all gates pass.
+
+Stop and report for any approval-gated slice, missing evidence, validation failure, drift, review failure, unauthorized file change, dirty post-commit state, harness failure, branch or plan mismatch, requested external side effect, or blocker outside the frozen contract. Do not self-approve human-gated work.
+
+When the requested scope stops or completes, summarize the MC run: slices attempted, slices committed, gate result for each slice, stop reason if any, artifact location, current git status, and the next action needed from me.
 ```
 
-Use `--worker-tools` only when the run requires external workers; omit it for a plain orchestrator-only run. Use `--allow-profile-command` for normal local MC execution so MC composes the tested harness command from the selected tool profile and run requirements instead of relying on hand-written sandbox flags.
-
-MC is still not a planner. It consumes the implementation-plan contract, refuses incomplete or approval-gated slices, and stops on missing evidence, failed validation, drift, review failure, unauthorized files, dirty post-commit state, harness failure, or any condition outside policy. When a user gives a complete plan and says to implement it through MC, the default operating path is: initialize or reuse the run, preflight, dry-run the next slice, run the requested scope with profile commands, summarize, and inspect artifacts before reporting.
+This is the right mode when you want the work to keep moving without manually reprompting each slice, but still want the safety boundary held outside the implementing agent. MC is not a planner; create or repair the plan first with `implementation-plan`, then hand the complete plan to MC.
 
 ## Setup
 

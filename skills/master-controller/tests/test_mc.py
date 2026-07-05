@@ -1064,6 +1064,14 @@ Continue later.
         self.assertFalse(mc.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
         (artifact / "drift-audit.md").write_text("verdict\n", encoding="utf-8")
         self.assertTrue(mc.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
+        artifact_relative = artifact.relative_to(self.repo) / "drift-audit.md"
+        self.assertTrue(
+            mc.artifact_exists(self.repo, artifact, {"drift_audit": {"path": str(artifact_relative)}}, "drift_audit", "drift-audit.md")
+        )
+        (self.repo / "README.md").write_text("not an audit artifact\n", encoding="utf-8")
+        self.assertFalse(
+            mc.artifact_exists(self.repo, artifact, {"drift_audit": {"path": "README.md"}}, "drift_audit", "drift-audit.md")
+        )
         # An existing file outside the run must not satisfy the evidence check.
         self.assertFalse(
             mc.artifact_exists(self.repo, artifact, {"drift_audit": {"path": sys.executable}}, "drift_audit", "drift-audit.md")
@@ -1086,6 +1094,45 @@ Continue later.
         self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
         with self.assertRaisesRegex(mc.McError, "plan file changed"):
             mc.verify_plan_unchanged(state, self.plan)
+
+    def test_run_remaining_verifies_plan_before_completion_check(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        state["slices"].append({"slice_id": "Slice 1", "status": "pass"})
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            scope="remaining",
+            dry_run=False,
+            timeout_seconds=1,
+            poll_seconds=0.1,
+            harness_command=None,
+        )
+        with self.assertRaisesRegex(mc.McError, "plan file changed"):
+            mc.run_remaining(args)
+
+    def test_reconcile_verifies_plan_before_gate_recheck(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["slices"].append(
+            {
+                "slice_id": "Slice 1",
+                "title": "First Slice",
+                "status": "fail",
+                "started_at": "2026-01-01T00:00:00Z",
+                "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+                "before_head": None,
+            }
+        )
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with self.assertRaisesRegex(mc.McError, "plan file changed"):
+            mc.reconcile(args)
 
     def test_init_rejects_duplicate_slice_numbers(self):
         dup = self.repo / "dup.md"
@@ -1210,6 +1257,31 @@ Continue later.
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "failed")
         self.assertIn("boom", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_records_cancelled_state_on_keyboard_interrupt(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "fake_harness.py"
+        write_fake_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        run_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=10,
+            poll_seconds=0.1,
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+        )
+        with mock.patch.object(mc_runner, "verify_gate", side_effect=KeyboardInterrupt):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.run_next(run_args), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["stop_reason"], "interrupted by user")
         self.assertIsNone(state["current_slice"])
 
     # --- Cross-skill dependency contract ---------------------------------

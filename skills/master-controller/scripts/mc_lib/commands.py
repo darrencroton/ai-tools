@@ -167,7 +167,9 @@ def summarize(args: argparse.Namespace) -> int:
     print(f"MC run {state['run_id']} summary")
     print(f"Status: {state['status']}")
     if state["status"] == "partial":
-        slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+        plan = resolve_plan(Path(state["plan_path"]))
+        verify_plan_unchanged(state, plan)
+        slices = parse_plan(plan)
         candidate = next_slice(slices, state)
         if candidate:
             print(f"Next slice: {candidate.slice_id} - {candidate.title}")
@@ -223,7 +225,9 @@ def run_remaining(args: argparse.Namespace) -> int:
         if state.get("status") in RUN_STOP_STATUSES:
             print(f"Run is stopped: {state['status']}")
             return 2
-        slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+        plan = resolve_plan(Path(state["plan_path"]))
+        verify_plan_unchanged(state, plan)
+        slices = parse_plan(plan)
         if next_slice(slices, state) is None:
             state["status"] = "complete"
             state["current_slice"] = None
@@ -249,7 +253,9 @@ def reconcile(args: argparse.Namespace) -> int:
         print(f"{entry.get('slice_id', 'unknown')} is already complete.")
         return 0
     slice_id = str(entry.get("slice_id", ""))
-    slices = parse_plan(resolve_plan(Path(state["plan_path"])))
+    plan = resolve_plan(Path(state["plan_path"]))
+    verify_plan_unchanged(state, plan)
+    slices = parse_plan(plan)
     plan_slice = plan_slice_by_id(slices, slice_id)
     if plan_slice is None:
         raise McError(f"failed slice is not in the plan: {slice_id}")
@@ -371,8 +377,16 @@ def preflight(args: argparse.Namespace) -> int:
         check("harness launch resolves", False, str(exc))
 
     plan_path = resolve_plan(Path(state["plan_path"]))
+    try:
+        verify_plan_unchanged(state, plan_path)
+        plan_is_current = True
+        plan_detail = str(plan_path)
+    except McError as exc:
+        plan_is_current = False
+        plan_detail = str(exc)
     check("plan file", plan_path.exists(), str(plan_path))
-    slices = parse_plan(plan_path)
+    check("plan unchanged", plan_is_current, plan_detail)
+    slices = parse_plan(plan_path) if plan_is_current else []
     candidate = next_slice(slices, state)
     check("remaining slice", candidate is not None, candidate.slice_id if candidate else "none")
     if candidate:

@@ -42,6 +42,30 @@ def _capture_git_evidence(repo: Path, slice_artifact_dir: Path, attempt: int, be
     return after_head, after_status
 
 
+def _capture_failure_evidence(
+    adapter: TmuxHarnessAdapter,
+    *,
+    session_name: str,
+    harness_name: str,
+    repo: Path,
+    orchestrator_session_id: str | None,
+    slice_artifact_dir: Path,
+    attempt: int,
+    before_head: str | None,
+) -> None:
+    """Best-effort evidence capture for paths already handling a failure."""
+    for capture_step in (
+        lambda: adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt"),
+        lambda: capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir),
+        lambda: capture_worker_runs_summary(slice_artifact_dir),
+        lambda: _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head),
+    ):
+        try:
+            capture_step()
+        except Exception:
+            continue
+
+
 def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_dir: Path) -> int:
     runnable, reasons = eligibility(plan_slice)
     run_json = run_dir / "run.json"
@@ -185,16 +209,34 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             else:
                 after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
                 last_gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
+        except KeyboardInterrupt:
+            _capture_failure_evidence(
+                adapter,
+                session_name=session_name,
+                harness_name=harness_name,
+                repo=repo,
+                orchestrator_session_id=orchestrator_session_id,
+                slice_artifact_dir=slice_artifact_dir,
+                attempt=attempt,
+                before_head=before_head,
+            )
+            last_gate = GateDecision("cancelled", "interrupted by user")
         except Exception as exc:
             # Any failure — an McError from the harness/tmux path or an
             # unexpected exception — must not orphan the tmux session or leave
             # run.json stuck at "running". Capture whatever evidence exists and
             # record a failed gate so the run stops fail-closed. force_stop runs
             # in the finally block below regardless of which path we took.
-            adapter.capture(session_name, slice_artifact_dir / "pane-capture.txt")
-            capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
-            capture_worker_runs_summary(slice_artifact_dir)
-            _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
+            _capture_failure_evidence(
+                adapter,
+                session_name=session_name,
+                harness_name=harness_name,
+                repo=repo,
+                orchestrator_session_id=orchestrator_session_id,
+                slice_artifact_dir=slice_artifact_dir,
+                attempt=attempt,
+                before_head=before_head,
+            )
             last_gate = GateDecision("failed", str(exc) or repr(exc))
         finally:
             adapter.force_stop(session_name)
