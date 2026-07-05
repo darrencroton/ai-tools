@@ -2,7 +2,7 @@
 
 Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, verifies gates from outside the harness session, and stops whenever policy requires human approval.
 
-MC has two documented operating styles. Model-supervised MC keeps the MC model in the loop for live operational judgment while deterministic commands own state transitions and gates. Deterministic batch MC runs the existing fail-closed `run-next` and `run --scope remaining` paths for simple unattended execution. The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
+MC has two documented operating styles. Model-supervised MC keeps the MC model in the loop for live operational judgment while deterministic commands own state transitions and gates. Deterministic batch MC runs the existing fail-closed `run-next` and `run --scope remaining` paths for simple unattended execution. The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, model-supervised observe/send/start/wait/pause/finalize/stop primitives, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
 
 ## What MC Owns
 
@@ -86,6 +86,50 @@ python3 skills/master-controller/scripts/mc.py run \
   --allow-profile-command
 ```
 
+Start the next eligible slice in model-supervised mode and return immediately:
+
+```bash
+python3 skills/master-controller/scripts/mc.py start-slice \
+  --repo /path/to/repo \
+  --worker-tools copilot \
+  --allow-profile-command
+```
+
+Observe or wait on the active model-supervised slice without finalizing gates:
+
+```bash
+python3 skills/master-controller/scripts/mc.py observe --repo /path/to/repo
+python3 skills/master-controller/scripts/mc.py wait --repo /path/to/repo --seconds 120 --poll-seconds 2
+```
+
+Send a short literal instruction to the active slice session:
+
+```bash
+python3 skills/master-controller/scripts/mc.py send \
+  --repo /path/to/repo \
+  --text "You were interrupted. Review what you were doing then continue." \
+  --reason "resume after rolling usage reset"
+```
+
+Pause until an explicit timestamp with timezone, then return control for re-observation:
+
+```bash
+python3 skills/master-controller/scripts/mc.py pause-until \
+  --repo /path/to/repo \
+  --until 2026-07-05T18:30:00+10:00 \
+  --buffer-seconds 180 \
+  --reason "rolling usage reset"
+```
+
+Finalize or stop the active model-supervised slice:
+
+```bash
+python3 skills/master-controller/scripts/mc.py finalize-slice --repo /path/to/repo
+python3 skills/master-controller/scripts/mc.py stop-with-evidence \
+  --repo /path/to/repo \
+  --reason "weekly usage cap shown on screen"
+```
+
 Cancel a run and record the reason:
 
 ```bash
@@ -123,7 +167,7 @@ Current deterministic batch sequence:
 
 Do not ask users to hand-compose Codex or Claude sandbox flags. Use `profiles`, `preflight`, `--worker-tools`, and `--allow-profile-command` so MC chooses the tested launch path from tool capabilities plus run requirements.
 
-Model-supervised sequence once the primitive commands are available:
+Model-supervised sequence:
 
 1. Initialize or reuse the run, preflight the harness, and dry-run the next slice.
 2. Start the next eligible slice and return control to the MC model.
@@ -183,7 +227,7 @@ Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `act
 
 `run.json` includes a `supervision` object with default pause/retry policy, pause budgets, and the default continuation prompt. Existing runs that do not have this object load with backwards-compatible defaults. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
 
-While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, and an optional `pause` object. Persisting `before_head` is required for later model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`.
+While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, an optional `orchestrator_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`.
 
 Worker state and temporary files should stay under the slice artifact directory. MC exports fixed paths for worker runs, temporary files, and tool-specific home directories so orchestrators do not have to invent locations.
 
@@ -209,14 +253,15 @@ The plan is frozen at `init` by content digest. If the plan file changes mid-run
 
 The model-supervised transition adds these durable concepts without changing deterministic gate acceptance:
 
-- `supervision.mode`: currently defaults to `deterministic-batch`; later model-supervised runs can set `model-supervised`.
+- `supervision.mode`: defaults to `deterministic-batch`; `start-slice` sets it to `model-supervised`.
 - `supervision.pause_policy`: names recoverable rolling-window and transient-service handling while preserving hard stops for weekly/account/unknown events.
 - `supervision.pause_counters`: tracks consecutive pauses for the current slice and cumulative paused seconds for the run.
 - `operational_events_path`: points at the append-only JSONL event log for observations, sends, waits, pauses, resumes, and stops.
 - `current_slice.before_head`: records the commit at slice start for out-of-process finalization.
+- `current_slice.orchestrator_session_id`: records the launched Claude session id when MC composed one for transcript capture.
 - `current_slice.pause`: records `paused_until`, `reason`, and an evidence event id when a bounded pause is active.
 
-The planned model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. Until they are implemented, use the current CLI commands. Once implemented, they must not accept work by interpreting natural-language output; they only provide operational control and evidence capture before deterministic gates run.
+The model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. They must not accept work by interpreting natural-language output; they only provide operational control and evidence capture before deterministic gates run.
 
 ## Safe Local Trial
 

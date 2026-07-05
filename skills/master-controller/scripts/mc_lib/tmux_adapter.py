@@ -22,6 +22,42 @@ TRUST_PROMPT_MARKERS = (
     "Do you trust the files in this directory",
 )
 
+HARD_PROMPT_MARKERS: dict[str, tuple[str, ...]] = {
+    "trust_prompt": TRUST_PROMPT_MARKERS,
+    "approval_prompt": (
+        "Do you want to proceed?",
+        "Approve this action",
+        "Allow this command",
+        "requires approval",
+        "approval required",
+    ),
+    "credential_prompt": (
+        "Enter API key",
+        "Enter password",
+        "Enter your password",
+        "Login required",
+        "Please log in",
+        "Sign in to continue",
+        "MFA",
+        "two-factor",
+    ),
+    "permission_prompt": (
+        "Permission denied",
+        "Grant permission",
+        "requires permission",
+        "allow access",
+    ),
+    "external_side_effect_request": (
+        "push to remote",
+        "create pull request",
+        "deploy",
+        "release",
+        "publish",
+        "install dependency",
+        "license change",
+    ),
+}
+
 
 class TmuxHarnessAdapter:
     """Single tmux-backed harness adapter for the configured command."""
@@ -106,6 +142,24 @@ class TmuxHarnessAdapter:
                     f"{executable} directory trust prompt blocked unattended launch; trust the repo before running MC"
                 )
 
+    @staticmethod
+    def detect_hard_prompt(capture: str) -> dict[str, Any]:
+        """Return conservative hard-prompt flags from visible pane text."""
+        lowered = capture.lower()
+        matches: dict[str, Any] = {
+            "present": False,
+            "kinds": [],
+            "markers": [],
+        }
+        for kind, markers in HARD_PROMPT_MARKERS.items():
+            for marker in markers:
+                if marker.lower() in lowered:
+                    matches["present"] = True
+                    if kind not in matches["kinds"]:
+                        matches["kinds"].append(kind)
+                    matches["markers"].append(marker)
+        return matches
+
     def wait_until_prompt_ready(self, session_name: str) -> None:
         command_parts = shlex.split(self.command) if self.command.strip() else []
         executable = Path(command_parts[0]).name if command_parts else ""
@@ -176,7 +230,29 @@ class TmuxHarnessAdapter:
         time.sleep(1.0)
         run_command(["tmux", "send-keys", "-t", session_name, "C-m"], allow_failure=True)
 
+    def send_literal(self, session_name: str, text: str) -> None:
+        if not self.session_exists(session_name):
+            raise McError(f"tmux session is not running: {session_name}")
+        capture = self._pane_text(session_name)
+        hard_prompt = self.detect_hard_prompt(capture)
+        if hard_prompt["present"]:
+            raise McError(
+                "refusing to send into hard prompt on screen: "
+                + ", ".join(str(kind) for kind in hard_prompt["kinds"])
+            )
+        run_command(["tmux", "send-keys", "-t", session_name, "-l", text], error_prefix="tmux literal send failed")
+        # Keep the same settle-and-resubmit discipline as send_prompt. This
+        # avoids the known single-Enter race in Codex/Claude TUIs while still
+        # using literal tmux input rather than shell evaluation.
+        time.sleep(1.0)
+        run_command(["tmux", "send-keys", "-t", session_name, "C-m"], allow_failure=True)
+        time.sleep(1.0)
+        run_command(["tmux", "send-keys", "-t", session_name, "C-m"], allow_failure=True)
+
     def capture(self, session_name: str, destination: Path) -> None:
+        if not shutil.which("tmux"):
+            destination.write_text("tmux was unavailable during capture\n", encoding="utf-8")
+            return
         result = run_command(["tmux", "capture-pane", "-p", "-S", "-32768", "-t", session_name], allow_failure=True)
         if result.returncode == 0:
             destination.write_text(result.stdout, encoding="utf-8")
@@ -184,7 +260,17 @@ class TmuxHarnessAdapter:
             destination.write_text("tmux pane was unavailable during capture\n", encoding="utf-8")
 
     def session_exists(self, session_name: str) -> bool:
+        if not shutil.which("tmux"):
+            return False
         return run_command(["tmux", "has-session", "-t", session_name], allow_failure=True).returncode == 0
+
+    def sessions_with_prefix(self, prefix: str) -> list[str]:
+        if not shutil.which("tmux"):
+            return []
+        result = run_command(["tmux", "list-sessions", "-F", "#{session_name}"], allow_failure=True)
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip().startswith(prefix)]
 
     def detect_activity(self, session_name: str, previous_capture: str) -> dict[str, Any]:
         if not self.session_exists(session_name):

@@ -33,7 +33,7 @@ Docker and container setup are out of scope. MC may run inside a container or on
 5. **Verify gates** - independently compare the orchestrator result to git state, plan authorization, validation, drift audit verdict, review verdict, and commit state.
 6. **Advance or stop** - move to the next slice only when every gate passes. Stop with a precise reason for human approval, drift, failed validation, failed review, harness failure, or incomplete evidence.
 
-The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries. Model-supervised primitives for observing, sending, waiting, pausing, and finalizing are part of the documented contract for this transition; until each primitive is implemented, use only commands listed by the current CLI and keep deterministic acceptance gates unchanged.
+The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, model-supervised observing/sending/waiting/pausing/finalizing, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries. Keep deterministic acceptance gates unchanged: model-supervised primitives provide operational control and evidence, not acceptance.
 
 ## Default Operating Path
 
@@ -48,7 +48,7 @@ Current deterministic batch path:
 5. If the user requested one slice, run `run-next`. If the user requested the plan or all remaining work and deterministic batch execution is appropriate, run `run --scope remaining`.
 6. After the run stops or completes, run `summarize`, inspect `run.json`, inspect the selected slice artifact directories, and check git status before reporting.
 
-Model-supervised path once the primitive commands are available:
+Model-supervised path:
 
 1. Initialize or reuse the run, run preflight, and dry-run the next slice.
 2. Start the next eligible slice through the MC primitive that returns control immediately.
@@ -104,12 +104,19 @@ python3 skills/master-controller/scripts/mc.py run-next --repo <path> --dry-run
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --harness-model <model> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py start-slice --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py observe --repo <path>
+python3 skills/master-controller/scripts/mc.py wait --repo <path> --seconds <n>
+python3 skills/master-controller/scripts/mc.py send --repo <path> --text <text> --reason <reason>
+python3 skills/master-controller/scripts/mc.py pause-until --repo <path> --until <iso-timestamp-with-timezone> --reason <reason>
+python3 skills/master-controller/scripts/mc.py finalize-slice --repo <path>
+python3 skills/master-controller/scripts/mc.py stop-with-evidence --repo <path> --reason <reason>
 python3 skills/master-controller/scripts/mc.py reconcile --repo <path>
 python3 skills/master-controller/scripts/mc.py stop --repo <path> --reason <reason>
 python3 skills/master-controller/scripts/mc.py archive-sensitive --repo <path> --dry-run
 ```
 
-Planned model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. They must preserve the same trust boundary: the MC model may reason over operational evidence, but acceptance still requires deterministic local gates.
+Model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. They preserve the same trust boundary: the MC model may reason over operational evidence, but acceptance still requires deterministic local gates.
 
 Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails and cannot be safely reconciled from local evidence.
 

@@ -519,6 +519,189 @@ Continue later.
         self.assertFalse(activity["active"])
         self.assertEqual(activity["capture"], "")
 
+    def test_adapter_send_literal_uses_literal_input_and_robust_submit(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        calls = [
+            mc.CommandResult(0, "", ""),  # session_exists
+            mc.CommandResult(0, "ready", ""),  # pane capture
+            mc.CommandResult(0, "", ""),  # literal send
+            mc.CommandResult(0, "", ""),  # first submit
+            mc.CommandResult(0, "", ""),  # second submit
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls) as run, mock.patch.object(mc_tmux_adapter.time, "sleep"):
+            adapter.send_literal("session", "continue; $(no shell)")
+        self.assertEqual(run.call_args_list[2].args[0], ["tmux", "send-keys", "-t", "session", "-l", "continue; $(no shell)"])
+        self.assertEqual(run.call_args_list[3].args[0], ["tmux", "send-keys", "-t", "session", "C-m"])
+        self.assertEqual(run.call_args_list[4].args[0], ["tmux", "send-keys", "-t", "session", "C-m"])
+
+    def test_adapter_send_literal_refuses_hard_prompt(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, "Approve this action before continuing", ""),
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep"):
+            with self.assertRaisesRegex(mc.McError, "hard prompt"):
+                adapter.send_literal("session", "continue")
+
+    def test_adapter_lists_sessions_by_run_prefix(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        result = mc.CommandResult(0, "mc_run_slice-001_a1\nother\nmc_run_slice-002_a1\n", "")
+        with mock.patch.object(mc_tmux_adapter, "run_command", return_value=result):
+            self.assertEqual(adapter.sessions_with_prefix("mc_run_"), ["mc_run_slice-001_a1", "mc_run_slice-002_a1"])
+
+    def test_adapter_session_helpers_tolerate_missing_tmux(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "codex")
+        destination = Path(self.tmp.name) / "capture.txt"
+        with mock.patch.object(mc_tmux_adapter.shutil, "which", return_value=None):
+            self.assertFalse(adapter.session_exists("session"))
+            self.assertEqual(adapter.sessions_with_prefix("mc_run_"), [])
+            adapter.capture("session", destination)
+        self.assertIn("tmux was unavailable", destination.read_text(encoding="utf-8"))
+
+    def test_observe_without_current_slice_returns_snapshot_and_event(self):
+        state = self.init_run()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(mc.observe(args), 0)
+
+        snapshot = json.loads(output.getvalue())
+        self.assertIsNone(snapshot["current_slice"])
+        self.assertEqual(snapshot["result"]["parse_status"], "no-current-slice")
+        records = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[0]["kind"], "observation")
+
+    def test_observe_current_slice_captures_live_pane_and_result_state(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": True, "capture": "pane text"}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(mc.observe(args), 0)
+
+        snapshot = json.loads(output.getvalue())
+        self.assertEqual(snapshot["process"]["running"], True)
+        self.assertEqual(snapshot["pane"]["tail"], "pane text")
+        self.assertTrue((artifact / "pane-capture-live-latest.txt").exists())
+        self.assertTrue((artifact / "observation-latest.json").exists())
+
+    def test_send_records_literal_text_for_current_session(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "ready"}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            text="You were interrupted. Continue.",
+            reason="resume after reset",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.send(args), 0)
+        fake_adapter.send_literal.assert_called_once_with("mc_test_slice-001_a1", "You were interrupted. Continue.")
+        records = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(records[-1]["kind"], "send")
+        self.assertEqual(records[-1]["text"], "You were interrupted. Continue.")
+
+    def test_send_refuses_hard_prompt_from_observation(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Approve this action"}
+        fake_adapter.detect_hard_prompt.return_value = {"present": True, "kinds": ["approval_prompt"], "markers": ["Approve this action"]}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            text="continue",
+            reason="test",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with self.assertRaisesRegex(mc.McError, "hard prompt"):
+                mc.send(args)
+        fake_adapter.send_literal.assert_not_called()
+
     def write_gate_result(self, artifact, *, changed_files, validation_result="pass", drift="PASS", review="PASS", commit_hash=None):
         artifact.mkdir(parents=True, exist_ok=True)
         (artifact / "validation-summary.md").write_text("validation\n", encoding="utf-8")
@@ -785,6 +968,152 @@ Continue later.
         self.assertTrue(activity_path.exists())
         activity = json.loads(activity_path.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(set(activity), {"active", "checked_at", "running"})
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_model_supervised_start_wait_finalize_records_pass(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "fake_harness.py"
+        write_fake_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=10,
+            poll_seconds=0.1,
+            reason="test",
+            until=mc.utc_now(),
+            buffer_seconds=0,
+            status="needs-human",
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        before_start = git(self.repo, "rev-parse", "HEAD")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.start_slice(command_args), 0)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        running = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(running["supervision"]["mode"], "model-supervised")
+        self.assertEqual(running["current_slice"]["before_head"], before_start)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "partial")
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(state["slices"][0]["status"], "pass")
+        self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
+        self.assertTrue((run_dir / "slices" / "slice-001" / "observation-latest.json").exists())
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_model_supervised_finalize_blocks_missing_result_after_process_exit(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "no_result_harness.py"
+        write_no_result_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=10,
+            poll_seconds=0.1,
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.start_slice(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.finalize_slice(command_args), 2)
+        state = json.loads((((self.repo / ".ai-mc" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("orchestrator result missing", state["stop_reason"])
+
+    def test_start_slice_reaps_stale_run_sessions_before_launch(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        fake_adapter = mock.Mock()
+        stale_session = f"mc_{state['run_id']}_slice-099_a1"
+        fake_adapter.sessions_with_prefix.return_value = [stale_session]
+        fake_adapter.harness_name = "codex"
+        fake_adapter.allow_unattended_default = False
+        fake_adapter.command_override = "python fake.py"
+        fake_adapter.command = "python fake.py"
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(f"captured {session_name}\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        args = argparse.Namespace(
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            result = mc.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+
+        fake_adapter.force_stop.assert_called_with(stale_session)
+        self.assertEqual(result["reaped_stale_sessions"][0]["tmux_session"], stale_session)
+        evidence = Path(result["reaped_stale_sessions"][0]["evidence_path"])
+        self.assertTrue(evidence.exists())
+        self.assertIn(stale_session, evidence.read_text(encoding="utf-8"))
+
+    def test_pause_until_persists_pause_state_and_budget_counters(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": "a" * 40,
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "paused"}
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            until=mc.utc_now(),
+            buffer_seconds=0,
+            reason="rolling reset",
+            poll_seconds=0.1,
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.pause_until(args), 0)
+        paused = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(paused["status"], "resuming")
+        self.assertIsNone(paused["current_slice"]["pause"])
+        self.assertEqual(paused["supervision"]["pause_counters"]["consecutive_pauses_current_slice"], 1)
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_remaining_completes_two_toy_slices(self):

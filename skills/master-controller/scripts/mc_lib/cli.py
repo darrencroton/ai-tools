@@ -5,15 +5,22 @@ import sys
 
 from .commands import (
     archive_sensitive,
+    finalize_slice,
     init_run,
     list_profiles,
+    observe,
+    pause_until,
     preflight,
     reconcile,
     run_next,
     run_remaining,
+    send,
+    start_slice,
     status,
     stop,
+    stop_with_evidence,
     summarize,
+    wait,
 )
 from .constants import DEFAULT_POLL_SECONDS, DEFAULT_TIMEOUT_SECONDS
 from .models import McError
@@ -91,6 +98,63 @@ def build_parser() -> argparse.ArgumentParser:
     add_harness_args(run_parser)
     add_unattended_default_arg(run_parser)
     run_parser.set_defaults(func=run_remaining, dry_run=False)
+
+    observe_parser = subparsers.add_parser("observe", help="observe the active model-supervised slice without finalizing it")
+    add_repo_run_args(observe_parser)
+    add_harness_args(observe_parser)
+    add_unattended_default_arg(observe_parser)
+    observe_parser.set_defaults(func=observe)
+
+    send_parser = subparsers.add_parser("send", help="send literal text to the active model-supervised tmux session")
+    add_repo_run_args(send_parser)
+    send_parser.add_argument("--text", required=True, help="literal text to send")
+    send_parser.add_argument("--reason", required=True, help="reason recorded in the operational event log")
+    add_harness_args(send_parser)
+    add_unattended_default_arg(send_parser)
+    send_parser.set_defaults(func=send)
+
+    start_parser = subparsers.add_parser("start-slice", help="start the next eligible slice and return immediately")
+    add_repo_run_args(start_parser)
+    add_harness_args(start_parser)
+    add_unattended_default_arg(start_parser)
+    start_parser.set_defaults(func=start_slice)
+
+    wait_parser = subparsers.add_parser("wait", help="observe the active slice for a bounded duration")
+    add_repo_run_args(wait_parser)
+    wait_parser.add_argument("--seconds", type=float, required=True, help="maximum seconds to wait")
+    wait_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between observations")
+    add_harness_args(wait_parser)
+    add_unattended_default_arg(wait_parser)
+    wait_parser.set_defaults(func=wait)
+
+    pause_parser = subparsers.add_parser("pause-until", help="pause and observe until an absolute timestamp plus optional buffer")
+    add_repo_run_args(pause_parser)
+    pause_parser.add_argument("--until", required=True, help="ISO-8601 timestamp with timezone")
+    pause_parser.add_argument("--buffer-seconds", type=int, help="optional buffer added after --until")
+    pause_parser.add_argument("--reason", required=True, help="pause reason recorded in state and operational events")
+    pause_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between observations")
+    add_harness_args(pause_parser)
+    add_unattended_default_arg(pause_parser)
+    pause_parser.set_defaults(func=pause_until)
+
+    finalize_parser = subparsers.add_parser("finalize-slice", help="capture evidence and run deterministic gates for the active slice")
+    add_repo_run_args(finalize_parser)
+    add_harness_args(finalize_parser)
+    add_unattended_default_arg(finalize_parser)
+    finalize_parser.set_defaults(func=finalize_slice)
+
+    stop_evidence_parser = subparsers.add_parser("stop-with-evidence", help="stop the active slice after preserving evidence")
+    add_repo_run_args(stop_evidence_parser)
+    stop_evidence_parser.add_argument("--reason", required=True, help="stop reason recorded in run state and operational events")
+    stop_evidence_parser.add_argument(
+        "--status",
+        default="needs-human",
+        choices=["needs-human", "blocked", "failed", "cancelled"],
+        help="run status to record",
+    )
+    add_harness_args(stop_evidence_parser)
+    add_unattended_default_arg(stop_evidence_parser)
+    stop_evidence_parser.set_defaults(func=stop_with_evidence)
 
     reconcile_parser = subparsers.add_parser("reconcile", help="re-check and repair a stopped slice from local evidence")
     add_repo_run_args(reconcile_parser)

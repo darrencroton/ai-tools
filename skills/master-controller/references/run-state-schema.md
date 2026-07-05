@@ -43,6 +43,7 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "attempt": 1,
     "started_at": "2026-07-04T01:35:00Z",
     "before_head": "<commit HEAD immediately before this slice attempt started>",
+    "orchestrator_session_id": "<optional Claude session id for transcript capture>",
     "pause": null
   },
   "supervision": {
@@ -100,7 +101,7 @@ Allowed run `status` values:
 
 ## Supervision State
 
-`supervision.mode` is `deterministic-batch` for the current compatibility path and may be set to `model-supervised` by later runtime primitives. The policy fields describe defaults and budgets; they do not by themselves authorize accepting a slice.
+`supervision.mode` is `deterministic-batch` for the compatibility path and is set to `model-supervised` by the model-supervised `start-slice` primitive. The policy fields describe defaults and budgets; they do not by themselves authorize accepting a slice.
 
 `pause_policy` names the intended operational policy:
 
@@ -122,7 +123,7 @@ Existing run files without `supervision` or `operational_events_path` load with 
 
 ## Operational Events
 
-`operational_events_path` points at an append-only JSONL file. Later model-supervised primitives should append observations, waits, sends, pauses, resumes, retries, hard-stop detections, finalization attempts, and stop-with-evidence records there.
+`operational_events_path` points at an append-only JSONL file. Model-supervised primitives append observations, waits, sends, pauses, resumes, retries, hard-stop detections, finalization attempts, and stop-with-evidence records there.
 
 Example line:
 
@@ -149,7 +150,9 @@ Append-only event writes must not rewrite unrelated `run.json` state.
 
 ## Current Slice
 
-`current_slice.before_head` records the commit at the beginning of the active slice attempt. This is mandatory for later `finalize-slice` implementations because out-of-process finalization must compare changed files against the real slice start. Guessing `HEAD^` can miss earlier commits made by the same slice.
+`current_slice.before_head` records the commit at the beginning of the active slice attempt. This is mandatory for `finalize-slice` because out-of-process finalization must compare changed files against the real slice start. Guessing `HEAD^` can miss earlier commits made by the same slice.
+
+`current_slice.orchestrator_session_id` is optional and records the launched Claude session id when MC composed one. `finalize-slice` and `stop-with-evidence` use it to capture `orchestrator-transcript.jsonl` without relying only on pane text.
 
 `current_slice.pause` is either `null` or:
 
@@ -197,7 +200,7 @@ Runtime slices append entries to `slices`:
 
 Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
-Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe` or `wait` has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
 MC sets these environment variables for every slice harness:
 

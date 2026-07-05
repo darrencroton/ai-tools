@@ -11,17 +11,26 @@ from __future__ import annotations
 from .cli import build_parser, main
 from .commands import (
     archive_sensitive,
+    build_observation,
+    finalize_slice,
     init_run,
     list_profiles,
     nearest_existing_parent,
+    observe,
+    pause_until,
     preflight,
     print_check,
     reconcile,
+    record_observation,
     run_next,
     run_remaining,
+    send,
+    start_slice,
     status,
     stop,
+    stop_with_evidence,
     summarize,
+    wait,
 )
 from .constants import (
     COMPLETED_SLICE_STATUSES,
@@ -88,7 +97,7 @@ from .profiles import (
     profile_command,
     resolve_harness_command,
 )
-from .runner import execute_slice
+from .runner import execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
 from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
@@ -129,11 +138,12 @@ from .state import (
     update_state_for_stop,
     write_run,
 )
-from .tmux_adapter import TRUST_PROMPT_MARKERS, TmuxHarnessAdapter
-from .utils import run_id, utc_now
+from .tmux_adapter import HARD_PROMPT_MARKERS, TRUST_PROMPT_MARKERS, TmuxHarnessAdapter
+from .utils import parse_iso_datetime, run_id, utc_now
 
 __all__ = [
     "TRUST_PROMPT_MARKERS",
+    "HARD_PROMPT_MARKERS",
     "TmuxHarnessAdapter",
     "COMPLETED_SLICE_STATUSES",
     "CommandResult",
@@ -159,6 +169,7 @@ __all__ = [
     "append_operational_event",
     "artifact_exists",
     "build_parser",
+    "build_observation",
     "capture_orchestrator_transcript",
     "capture_worker_runs_summary",
     "changed_files_between",
@@ -172,6 +183,8 @@ __all__ = [
     "ensure_slice_runtime_dirs",
     "environment_preflight",
     "execute_slice",
+    "finalize_model_supervised_slice",
+    "finalize_slice",
     "git",
     "git_access_path",
     "git_head",
@@ -194,10 +207,13 @@ __all__ = [
     "normalize_authorized_entry",
     "normalize_stop_status",
     "object_field",
+    "observe",
     "operational_events_file",
     "parse_plan",
     "parse_sections",
+    "parse_iso_datetime",
     "parse_worker_tools",
+    "pause_until",
     "plan_digest",
     "plan_slice_by_id",
     "preflight",
@@ -206,6 +222,7 @@ __all__ = [
     "profile_command",
     "real_tool_home",
     "reconcile",
+    "record_observation",
     "relative_artifact_path",
     "render_orchestrator_prompt",
     "require_clean_worktree",
@@ -220,6 +237,7 @@ __all__ = [
     "run_json_path",
     "run_next",
     "run_remaining",
+    "send",
     "seed_worker_credentials",
     "sensitive_artifact_dirs",
     "skill_root",
@@ -231,7 +249,10 @@ __all__ = [
     "status_changed_files",
     "status_path",
     "stop",
+    "stop_with_evidence",
     "summarize",
+    "start_model_supervised_slice",
+    "start_slice",
     "tmux_session_name",
     "unauthorized_files",
     "update_run_locked",
@@ -242,6 +263,7 @@ __all__ = [
     "worker_credential_source",
     "worker_jobs_module",
     "worker_jobs_path",
+    "wait",
     "write_git_diff",
     "write_orchestrator_result",
     "write_reconciliation_artifact",

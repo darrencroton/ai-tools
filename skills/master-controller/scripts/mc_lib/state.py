@@ -148,8 +148,9 @@ def current_slice_state(
     attempt: int,
     started_at: str,
     before_head: str | None,
+    orchestrator_session_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "slice_id": plan_slice.slice_id,
         "title": plan_slice.title,
         "artifact_dir": relative_artifact_path(repo, slice_artifact_dir),
@@ -159,6 +160,9 @@ def current_slice_state(
         "before_head": before_head,
         "pause": None,
     }
+    if orchestrator_session_id:
+        state["orchestrator_session_id"] = orchestrator_session_id
+    return state
 
 
 def slice_entry_from_gate(
