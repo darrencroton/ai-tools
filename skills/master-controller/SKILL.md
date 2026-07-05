@@ -51,11 +51,12 @@ Current deterministic batch path:
 Model-supervised path:
 
 1. Initialize or reuse the run, run preflight, and dry-run the next slice.
-2. Start the next eligible slice through the MC primitive that returns control immediately.
-3. Observe live pane/log/json/git evidence on a calm cadence.
-4. If the harness reports a clear rolling 5-hour usage reset and the process is still alive, pause until reset plus buffer, re-observe for hard-stop prompts, then send a short continuation prompt.
-5. If a structured result appears, finalize through deterministic MC gates before advancing.
-6. Stop with evidence for weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, approval-gated, ambiguous, or policy-sensitive conditions.
+2. Start the next eligible slice with `start-slice`; do not use `run --scope remaining` for model-supervised operation.
+3. Observe live pane/log/json/git evidence with `observe` or bounded `wait` on a calm cadence.
+4. If the harness reports a clear rolling 5-hour usage reset and the process is still alive, pause until reset plus buffer with `pause-until`, re-observe for hard-stop prompts, then send a short continuation prompt with `send`.
+5. If a rolling-limit message appears after the harness process exits before a structured result, restart only from a clean authorized state or stop with evidence; do not send into the old session.
+6. If a structured result appears, finalize through deterministic MC gates with `finalize-slice` before advancing.
+7. Stop with evidence for weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, approval-gated, ambiguous, or policy-sensitive conditions.
 
 Ask the user only when required information cannot be inferred safely, such as the target repo, plan path, intended branch, whether to run one slice or all remaining slices, or whether an approval-gated slice should proceed. Do not ask the user to hand-compose harness sandbox flags; use MC profiles and preflight instead.
 

@@ -348,3 +348,110 @@ python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
 ```
 
 This trial creates only `.ai-mc/` state and the authorized toy commit inside the temporary repo. The `--harness-command` override is for controlled local validation; normal runs use the command named by `--harness`.
+
+To trial model-supervised usage-limit handling, reuse the same temporary repo setup and plan, then replace the harness with one that waits for the continuation prompt before writing a result:
+
+```bash
+cat > "$tmp/usage_limit_resume_harness.py" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import termios
+import time
+from pathlib import Path
+
+artifact = Path(os.environ["MC_SLICE_ARTIFACT_DIR"])
+attrs = termios.tcgetattr(sys.stdin)
+attrs[3] = attrs[3] & ~(termios.ECHO | termios.ICANON)
+attrs[6][termios.VMIN] = 0
+attrs[6][termios.VTIME] = 1
+termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+time.sleep(2.5)
+print("\033[2J\033[HUsage limit reached. Try again in 1 minute.", flush=True)
+seen = ""
+deadline = time.monotonic() + 12
+while time.monotonic() < deadline:
+    chunk = os.read(sys.stdin.fileno(), 4096).decode(errors="ignore")
+    if chunk:
+        seen += chunk
+    if "You were interrupted. Review what you were doing then continue." in seen:
+        break
+else:
+    raise SystemExit(3)
+
+Path("README.md").write_text("resumed after rolling limit\n", encoding="utf-8")
+subprocess.run(["git", "add", "README.md"], check=True)
+subprocess.run(["git", "commit", "-m", "Complete resumed slice"], check=True)
+commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+(artifact / "validation-summary.md").write_text("PASS\n", encoding="utf-8")
+(artifact / "drift-audit.md").write_text("PASS\n", encoding="utf-8")
+(artifact / "code-review.md").write_text("PASS\n", encoding="utf-8")
+(artifact / "orchestrator-result.json").write_text(json.dumps({
+    "schema_version": 1,
+    "slice_id": "Slice 1",
+    "status": "pass",
+    "summary": "resumed after rolling limit",
+    "changed_files": ["README.md"],
+    "validation": [{"command": "toy validation", "result": "pass", "notes": ""}],
+    "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+    "code_review": {"verdict": "PASS", "path": "code-review.md"},
+    "commit": {"requested": True, "created": True, "hash": commit_hash},
+    "next_action": "",
+    "blockers": []
+}), encoding="utf-8")
+time.sleep(2)
+PY
+python3 skills/master-controller/scripts/mc.py init --repo "$tmp" --plan "$tmp/plan.md" --harness codex
+python3 skills/master-controller/scripts/mc.py start-slice --repo "$tmp" --harness-command "python3 $tmp/usage_limit_resume_harness.py"
+python3 skills/master-controller/scripts/mc.py wait --repo "$tmp" --seconds 3 --poll-seconds 0.1
+python3 skills/master-controller/scripts/mc.py pause-until --repo "$tmp" --until "$(python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+PY
+)" --buffer-seconds 0 --reason "rolling usage reset"
+python3 skills/master-controller/scripts/mc.py send --repo "$tmp" --text "You were interrupted. Review what you were doing then continue." --reason "resume after rolling usage reset"
+python3 skills/master-controller/scripts/mc.py wait --repo "$tmp" --seconds 10 --poll-seconds 0.1
+python3 skills/master-controller/scripts/mc.py finalize-slice --repo "$tmp"
+python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
+```
+
+The first `wait` should show a non-hard-stop rolling-window usage hint with recovery guidance to pause and send a continuation prompt. `pause-until` records the bounded pause, `send` delivers only the continuation text to the current slice session, and `finalize-slice` still requires the normal validation, drift-audit, code-review, commit, and clean-worktree evidence before accepting the slice.
+
+To trial the exited-process usage-limit path, use a fresh temporary repo from the setup above and a harness that exits before creating `orchestrator-result.json`:
+
+```bash
+cat > "$tmp/usage_limit_exit_harness.py" <<'PY'
+import time
+
+time.sleep(2.5)
+print("\033[2J\033[HUsage limit reached. Try again in 1 minute.", flush=True)
+time.sleep(1)
+PY
+python3 skills/master-controller/scripts/mc.py init --repo "$tmp" --plan "$tmp/plan.md" --harness codex
+python3 skills/master-controller/scripts/mc.py start-slice --repo "$tmp" --harness-command "python3 $tmp/usage_limit_exit_harness.py"
+python3 skills/master-controller/scripts/mc.py wait --repo "$tmp" --seconds 3 --poll-seconds 0.1
+python3 skills/master-controller/scripts/mc.py wait --repo "$tmp" --seconds 5 --poll-seconds 0.1
+python3 skills/master-controller/scripts/mc.py finalize-slice --repo "$tmp"
+python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
+```
+
+The first `wait` should preserve the rolling-limit pane evidence while the harness is still alive. The second `wait` should return after the process exits without a structured result, and MC must not send a continuation prompt into the old session. `finalize-slice` should block because `orchestrator-result.json` is missing, so the MC model should restart only from a clean authorized state or stop for the user.
+
+For a minimal fast-exit variant that may close before tmux can preserve the final pane text, use:
+
+```bash
+cat > "$tmp/usage_limit_exit_fast_harness.py" <<'PY'
+import time
+
+print("Usage limit reached. Try again in 1 minute.", flush=True)
+time.sleep(0.2)
+PY
+python3 skills/master-controller/scripts/mc.py init --repo "$tmp" --plan "$tmp/plan.md" --harness codex
+python3 skills/master-controller/scripts/mc.py start-slice --repo "$tmp" --harness-command "python3 $tmp/usage_limit_exit_fast_harness.py"
+python3 skills/master-controller/scripts/mc.py wait --repo "$tmp" --seconds 10 --poll-seconds 0.1
+python3 skills/master-controller/scripts/mc.py finalize-slice --repo "$tmp"
+python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
+```
+
+This variant still verifies the fail-closed gate behavior, but the final observation may contain only process-exited evidence if the tmux session closed before MC captured the usage-limit pane text.

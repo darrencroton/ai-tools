@@ -168,6 +168,67 @@ def write_no_result_harness(path):
     )
 
 
+def write_usage_limit_resume_harness(path):
+    path.write_text(
+        textwrap.dedent(
+            """
+            import json
+            import os
+            import subprocess
+            import sys
+            import termios
+            import time
+            from pathlib import Path
+
+            artifact = Path(os.environ["MC_SLICE_ARTIFACT_DIR"])
+            slice_id = os.environ["MC_SLICE_ID"]
+            attrs = termios.tcgetattr(sys.stdin)
+            attrs[3] = attrs[3] & ~(termios.ECHO | termios.ICANON)
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 1
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+            time.sleep(2.5)
+            print("\\033[2J\\033[HUsage limit reached. Try again in 1 minute.", flush=True)
+            seen = ""
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                chunk = os.read(sys.stdin.fileno(), 4096).decode(errors="ignore")
+                if chunk:
+                    seen += chunk
+                if "You were interrupted. Review what you were doing then continue." in seen:
+                    break
+                time.sleep(0.05)
+            else:
+                raise SystemExit(3)
+
+            Path("README.md").write_text("resumed after rolling limit\\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], check=True)
+            subprocess.run(["git", "commit", "-m", "Complete resumed slice"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+            (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "orchestrator-result.json").write_text(json.dumps({
+                "schema_version": 1,
+                "slice_id": slice_id,
+                "status": "pass",
+                "summary": "resumed after rolling limit",
+                "changed_files": ["README.md"],
+                "validation": [{"command": "toy validation", "result": "pass", "notes": ""}],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": True, "created": True, "hash": commit_hash},
+                "next_action": "",
+                "blockers": [],
+            }), encoding="utf-8")
+            time.sleep(2)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def write_repairable_then_pass_harness(path):
     path.write_text(
         textwrap.dedent(
@@ -1163,6 +1224,125 @@ Continue later.
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
         self.assertTrue((run_dir / "slices" / "slice-001" / "observation-latest.json").exists())
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_model_supervised_usage_limit_pause_resume_trial_records_pass(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "usage_limit_resume_harness.py"
+        write_usage_limit_resume_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=3,
+            poll_seconds=0.1,
+            reason="rolling usage reset",
+            until=mc.utc_now(),
+            buffer_seconds=0,
+            text="You were interrupted. Review what you were doing then continue.",
+            status="needs-human",
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.start_slice(command_args), 0)
+        wait_output = io.StringIO()
+        with contextlib.redirect_stdout(wait_output):
+            self.assertEqual(mc.wait(command_args), 0)
+        first_wait = json.loads(wait_output.getvalue())
+        self.assertEqual(first_wait["wait_status"], "timeout")
+        usage_hint = next(hint for hint in first_wait["observation"]["operational_hints"] if hint["kind"] == "usage_limit")
+        self.assertEqual(usage_hint["subtype"], "rolling_window")
+        self.assertFalse(usage_hint["hard_stop"])
+        self.assertEqual(usage_hint["recovery_guidance"], "pause-until-reset-plus-buffer-then-send-continuation")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.pause_until(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.send(command_args), 0)
+        command_args.seconds = 10
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "partial")
+        self.assertEqual(state["slices"][0]["status"], "pass")
+        self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
+        events = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertIn("pause", [event["kind"] for event in events])
+        self.assertIn("send", [event["kind"] for event in events])
+
+    def test_model_supervised_usage_limit_process_exit_requires_finalize_or_stop(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": git(self.repo, "rev-parse", "HEAD"),
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {
+            "running": False,
+            "active": False,
+            "capture": "Usage limit reached. Try again in 1 minute.",
+        }
+        fake_adapter.detect_hard_prompt.return_value = {"present": False, "kinds": [], "markers": []}
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("Usage limit reached. Try again in 1 minute.\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=10,
+            poll_seconds=0.1,
+            reason="rolling usage reset",
+            until=mc.utc_now(),
+            buffer_seconds=0,
+            status="needs-human",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+            wait_output = io.StringIO()
+            with contextlib.redirect_stdout(wait_output):
+                self.assertEqual(mc.wait(command_args), 0)
+            wait_result = json.loads(wait_output.getvalue())
+            self.assertEqual(wait_result["wait_status"], "process-exited")
+            usage_hint = next(hint for hint in wait_result["observation"]["operational_hints"] if hint["kind"] == "usage_limit")
+            self.assertEqual(usage_hint["recovery_guidance"], "restart-from-clean-authorized-state-or-stop-for-user")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.finalize_slice(command_args), 2)
+        state = json.loads((((self.repo / ".ai-mc" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("orchestrator result missing", state["stop_reason"])
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_model_supervised_finalize_blocks_missing_result_after_process_exit(self):
