@@ -2,7 +2,7 @@
 
 Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, verifies gates from outside the harness session, and stops whenever policy requires human approval.
 
-The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
+MC has two documented operating styles. Model-supervised MC keeps the MC model in the loop for live operational judgment while deterministic commands own state transitions and gates. Deterministic batch MC runs the existing fail-closed `run-next` and `run --scope remaining` paths for simple unattended execution. The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
 
 ## What MC Owns
 
@@ -15,6 +15,7 @@ The current implementation provides contract docs, durable run state, conservati
 - Running one eligible slice with `run-next`.
 - Running eligible slices sequentially with `run --scope remaining`.
 - Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, and `orchestrator-result.json` artifacts.
+- Recording supervision state and append-only operational event logs for model-supervised runs.
 - Verifying orchestrator claims against git evidence and stopping on missing validation, unresolved drift/review failures, unauthorized files, missing commits, dirty post-commit state, or approval-gated slices.
 
 ## What MC Does Not Own
@@ -25,6 +26,7 @@ The current implementation provides contract docs, durable run state, conservati
 - Dependency, license, remote push, PR, release, or deployment actions.
 - Bypassing human approval for approval-gated work.
 - Inferring authorization when plan sections are missing.
+- Accepting a slice from screen text, transcript claims, or operational hints without deterministic gate evidence.
 
 ## CLI
 
@@ -105,16 +107,32 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 ## Default MC Execution Flow
 
-When a user provides a complete implementation plan and asks MC to implement it, the MC should not need a bespoke launch prompt. Use this sequence unless the user specifies a different scope or harness:
+When a user provides a complete implementation plan and asks MC to implement it, the MC should not need a bespoke launch prompt. Choose the operating style first:
+
+- Use **model-supervised MC** when live operational handling matters, such as usage/session limits or temporary service interruptions.
+- Use **deterministic batch MC** when a conservative fail-closed run is enough.
+
+Current deterministic batch sequence:
 
 1. Resolve the target repo, plan path, branch, harness, and worker tools from the user request and plan. Default harness is `codex`; worker tools are omitted unless the plan or user requires them.
 2. Initialize a run with `init` if needed, or reuse `.ai-mc/current` only after checking it points at the same repo and plan.
 3. Run `preflight --allow-profile-command`, adding `--worker-tools <tool[,tool]>` when workers are required.
 4. Run `run-next --dry-run` to verify the next eligible slice and authorized files.
-5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan.
+5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan and batch operation is appropriate.
 6. Run `summarize`, inspect `run.json`, inspect slice artifacts, and check git status before reporting.
 
 Do not ask users to hand-compose Codex or Claude sandbox flags. Use `profiles`, `preflight`, `--worker-tools`, and `--allow-profile-command` so MC chooses the tested launch path from tool capabilities plus run requirements.
+
+Model-supervised sequence once the primitive commands are available:
+
+1. Initialize or reuse the run, preflight the harness, and dry-run the next slice.
+2. Start the next eligible slice and return control to the MC model.
+3. Observe live pane/log/json/git evidence repeatedly.
+4. Wait, pause, send a continuation prompt, finalize, or stop based on bounded operational judgment.
+5. Finalize only through deterministic gates after `orchestrator-result.json` appears.
+6. Advance to the next eligible slice only after validation, authorization, review, commit, and clean-worktree evidence passes.
+
+Rolling 5-hour usage windows are recoverable operational pauses when the reset time or duration is clear, the harness process is still alive, no hard-stop prompt is visible, and the pause stays inside configured budgets. Weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, and ambiguous conditions stop for the user with evidence. If a rolling-limit message appears after the harness process exits without a structured result, MC must restart only from a clean authorized state or stop for the user.
 
 ## Profiles and Launch Requirements
 
@@ -138,6 +156,7 @@ State is stored under the target repository:
   runs/
     <timestamp>/
       run.json
+      operational-events.jsonl
       slices/
         slice-001/
           prompt.md
@@ -162,6 +181,10 @@ MC does not edit the project's own `.gitignore`. Instead, `init` writes a self-i
 
 Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit.
 
+`run.json` includes a `supervision` object with default pause/retry policy, pause budgets, and the default continuation prompt. Existing runs that do not have this object load with backwards-compatible defaults. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
+
+While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, and an optional `pause` object. Persisting `before_head` is required for later model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`.
+
 Worker state and temporary files should stay under the slice artifact directory. MC exports fixed paths for worker runs, temporary files, and tool-specific home directories so orchestrators do not have to invent locations.
 
 ## Plan Eligibility
@@ -181,6 +204,19 @@ The parser fails closed when a required section is missing, when no files are li
 Authorized file entries are matched with segment-aware globbing: a plain path matches exactly, a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
 
 The plan is frozen at `init` by content digest. If the plan file changes mid-run, MC stops before the next slice; a revised plan requires a fresh `init`. Duplicate `## Slice N:` numbers are rejected at `init`, and each runtime slice re-checks that the current branch still matches the branch captured at `init`.
+
+## Model-Supervised State Contract
+
+The model-supervised transition adds these durable concepts without changing deterministic gate acceptance:
+
+- `supervision.mode`: currently defaults to `deterministic-batch`; later model-supervised runs can set `model-supervised`.
+- `supervision.pause_policy`: names recoverable rolling-window and transient-service handling while preserving hard stops for weekly/account/unknown events.
+- `supervision.pause_counters`: tracks consecutive pauses for the current slice and cumulative paused seconds for the run.
+- `operational_events_path`: points at the append-only JSONL event log for observations, sends, waits, pauses, resumes, and stops.
+- `current_slice.before_head`: records the commit at slice start for out-of-process finalization.
+- `current_slice.pause`: records `paused_until`, `reason`, and an evidence event id when a bounded pause is active.
+
+The planned model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. Until they are implemented, use the current CLI commands. Once implemented, they must not accept work by interpreting natural-language output; they only provide operational control and evidence capture before deterministic gates run.
 
 ## Safe Local Trial
 

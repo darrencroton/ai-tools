@@ -253,6 +253,81 @@ class MasterControllerTests(unittest.TestCase):
         self.assertEqual(state["plan_path"], str(self.plan.resolve()))
         self.assertEqual(state["harness"]["name"], "codex")
         self.assertEqual(state["plan"]["slice_count"], 2)
+        self.assertEqual(state["supervision"]["mode"], "deterministic-batch")
+        self.assertIn("rolling_usage_limit", state["supervision"]["pause_policy"])
+        self.assertEqual(state["supervision"]["pause_counters"]["cumulative_pause_seconds_run"], 0)
+        self.assertEqual(state["operational_events_path"], f".ai-mc/runs/{state['run_id']}/operational-events.jsonl")
+
+    def test_old_run_state_loads_with_supervision_defaults(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        state.pop("supervision")
+        state.pop("operational_events_path")
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+
+        loaded = mc.load_run(run_json)
+
+        self.assertEqual(loaded["supervision"]["mode"], "deterministic-batch")
+        self.assertEqual(loaded["supervision"]["max_consecutive_pauses_per_slice"], 2)
+        self.assertEqual(loaded["operational_events_path"], f".ai-mc/runs/{state['run_id']}/operational-events.jsonl")
+
+    def test_append_operational_event_does_not_rewrite_run_json(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        before = run_json.read_text(encoding="utf-8")
+
+        event = mc.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+        second = mc.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+
+        self.assertEqual(run_json.read_text(encoding="utf-8"), before)
+        self.assertEqual(event["event_id"], "op-0001")
+        self.assertEqual(second["event_id"], "op-0002")
+        event_path = self.repo / state["operational_events_path"]
+        self.assertTrue(event_path.exists())
+        records = [json.loads(line) for line in event_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([record["event_id"] for record in records], ["op-0001", "op-0002"])
+        self.assertEqual(records[0]["kind"], "manual_note")
+
+    def test_current_slice_state_records_before_head_and_pause_slot(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        state = mc.current_slice_state(
+            self.repo,
+            plan_slice,
+            self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001",
+            "mc_test_slice-001_a1",
+            1,
+            "2026-01-01T00:00:00Z",
+            "a" * 40,
+        )
+
+        self.assertEqual(state["before_head"], "a" * 40)
+        self.assertEqual(state["pause"], None)
+        self.assertEqual(state["artifact_dir"], ".ai-mc/runs/test/slices/slice-001")
+
+    def test_status_displays_paused_current_slice_fields(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        state["status"] = "paused"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": ".ai-mc/runs/test/slices/slice-001",
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": "2026-01-01T00:00:00Z",
+            "before_head": "b" * 40,
+            "pause": {"paused_until": "2026-01-01T01:00:00Z", "reason": "rolling usage limit reset"},
+        }
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(mc.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+
+        rendered = output.getvalue()
+        self.assertIn("Supervision mode: deterministic-batch", rendered)
+        self.assertIn("Current before_head: " + "b" * 40, rendered)
+        self.assertIn("Paused until: 2026-01-01T01:00:00Z (rolling usage limit reset)", rendered)
 
     def test_runnable_slice(self):
         slices = mc.parse_plan(self.plan)

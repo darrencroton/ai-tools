@@ -10,7 +10,7 @@ Use these skills when you want AI to help you implement features and fix bugs wi
 
 **Hand it over and come back when it's done.** Give the agent a complete plan and let it run all remaining slices on its own — implementing, auditing scope, reviewing quality, and committing each slice that passes all gates. It stops if it hits a slice you've flagged for human approval or a problem it can't resolve within the agreed contract. Good when the plan is well-isolated and the cost of an error is low.
 
-**Supervise the run mechanically.** Use `master-controller` when you want the gatekeeper outside the slice orchestrator. It launches each slice in a fresh tmux-backed harness session, records durable artifacts, verifies the structured result against git state and plan authorization, and advances only when the gates pass.
+**Supervise the run with MC.** Use `master-controller` when you want the gatekeeper outside the slice orchestrator. In model-supervised mode, the MC model stays in the loop while deterministic tools start slices, observe tmux state, preserve artifacts, and enforce gates. In deterministic batch mode, MC runs fail-closed without live model judgment. Both modes accept work only from local evidence: authorized files, validation, drift audit, code review, commit ancestry, and clean git state.
 
 All paths use the same underlying skill chain. They differ in who holds the gates, how much state is captured mechanically, and when handoff happens.
 
@@ -106,7 +106,40 @@ When all slices are complete, write a final summary: slices committed, gate resu
 Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
 ```
 
-**Mode C — Run through MC.** Use `master-controller` when the plan is complete and you want the Mode A slice-by-slice workflow managed by an outside controller instead of by repeated human prompts. MC keeps durable state, starts each eligible slice in a fresh harness session, verifies the gates from outside that session, commits only slices that pass validation, drift audit, and code review, and stops for you on approval-gated work or anything outside policy:
+**Mode C — Run through MC.** Use `master-controller` when the plan is complete and you want the Mode A slice-by-slice workflow managed by an outside controller instead of by repeated human prompts. MC keeps durable state, starts each eligible slice in a fresh harness session, verifies the gates from outside that session, commits only slices that pass validation, drift audit, and code review, and stops for you on approval-gated work or anything outside policy.
+
+Mode C has two variants:
+
+- **Mode C1 — Model-supervised MC.** Use this when nuanced operational supervision matters. The MC model remains active, reads pane/log/json evidence, decides whether a live interruption is recoverable, and invokes deterministic MC tools for state transitions. Rolling 5-hour usage windows or temporary service interruptions can be bounded pauses when the pane evidence is clear and the harness session is still resumable. Weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, or ambiguous conditions are user stops.
+- **Mode C2 — Deterministic batch MC.** Use this for simple unattended runs where fail-closed behavior is enough. MC can run `run --scope remaining`, but it should stop rather than interpret unclear operational text. This remains the compatibility path for straightforward plans.
+
+Mode C1 launcher:
+
+```md
+Plan file: <path>
+Target repo: <path>
+Scope: <one slice, next slice, or all remaining slices>
+Harness: codex unless I specify otherwise.
+Worker tools: <omit unless the plan requires external workers, e.g. copilot>
+
+Use master-controller as the supervising skill for this run in model-supervised Mode C.
+
+Read the full plan file first. If the plan is incomplete, ambiguous, not an implementation-plan output, or needs material editing, stop and report instead of improvising.
+
+Use the current feature branch unless I explicitly name another branch. Confirm the target repo, plan file, branch, scope, harness, and worker tools before starting runtime execution.
+
+Initialize or reuse the MC run for this repo and plan, then run preflight and dry-run the next slice. Use MC profiles for normal local execution; do not ask me to hand-compose Codex or Claude sandbox flags.
+
+For each eligible slice, keep the MC model in the loop. Start the slice through MC, observe pane/log/json/git evidence on a calm cadence, and let deterministic MC commands preserve artifacts and enforce state transitions. If a structured result appears, finalize the slice through MC gates before advancing.
+
+Recover only bounded operational interruptions that are clearly transient and do not expand the slice contract. A rolling 5-hour usage window with a parseable reset can be paused until reset plus buffer when the harness process is alive; after re-observing for hard-stop prompts, send a continuation prompt such as `You were interrupted. Review what you were doing then continue.` If the process exited before writing a result, restart only from a clean authorized state; otherwise stop with evidence.
+
+Stop and report for any approval-gated slice, missing evidence, validation failure, drift, review failure, unauthorized file change, dirty post-commit state, branch or plan mismatch, weekly/monthly/account/billing cap, credential/trust/permission prompt, requested external side effect, destructive action, dependency/license change, harness failure, ambiguous operational state, or blocker outside the frozen contract. Do not self-approve human-gated work.
+
+When the requested scope stops or completes, summarize the MC run: slices attempted, slices committed, gate result for each slice, operational stop or recovery evidence if any, artifact location, current git status, and the next action needed from me.
+```
+
+Mode C2 deterministic batch launcher:
 
 ```md
 Plan file: <path>
@@ -130,7 +163,7 @@ Stop and report for any approval-gated slice, missing evidence, validation failu
 When the requested scope stops or completes, summarize the MC run: slices attempted, slices committed, gate result for each slice, stop reason if any, artifact location, current git status, and the next action needed from me.
 ```
 
-This is the right mode when you want the work to keep moving without manually reprompting each slice, but still want the safety boundary held outside the implementing agent. MC is not a planner; create or repair the plan first with `implementation-plan`, then hand the complete plan to MC.
+Mode C is the right family when you want the work to keep moving without manually reprompting each slice, but still want the safety boundary held outside the implementing agent. Use C1 when operational judgment matters; use C2 when a conservative batch run is enough. MC is not a planner; create or repair the plan first with `implementation-plan`, then hand the complete plan to MC.
 
 ## Setup
 

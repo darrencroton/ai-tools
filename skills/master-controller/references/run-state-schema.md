@@ -41,8 +41,30 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "artifact_dir": ".ai-mc/runs/20260704T013000Z/slices/slice-001",
     "tmux_session": "mc_20260704T013000Z_slice-001_a1",
     "attempt": 1,
-    "started_at": "2026-07-04T01:35:00Z"
+    "started_at": "2026-07-04T01:35:00Z",
+    "before_head": "<commit HEAD immediately before this slice attempt started>",
+    "pause": null
   },
+  "supervision": {
+    "mode": "deterministic-batch",
+    "pause_policy": {
+      "rolling_usage_limit": "wait-until-reset-plus-buffer",
+      "weekly_usage_limit": "stop-for-user",
+      "transient_service_unavailable": "bounded-retry",
+      "unknown_operational_event": "stop-for-user"
+    },
+    "default_resume_prompt": "You were interrupted. Review what you were doing then continue.",
+    "default_reset_buffer_seconds": 180,
+    "max_single_pause_seconds": 21600,
+    "max_consecutive_pauses_per_slice": 2,
+    "max_cumulative_pause_seconds_per_run": 43200,
+    "max_transient_retries_per_slice": 3,
+    "pause_counters": {
+      "consecutive_pauses_current_slice": 0,
+      "cumulative_pause_seconds_run": 0
+    }
+  },
+  "operational_events_path": ".ai-mc/runs/20260704T013000Z/operational-events.jsonl",
   "slices": [],
   "stop_reason": null
 }
@@ -52,6 +74,8 @@ Allowed run `status` values:
 
 - `initialized`
 - `running`
+- `paused`
+- `resuming`
 - `partial`
 - `needs-human`
 - `blocked`
@@ -68,9 +92,74 @@ Allowed run `status` values:
   baseline and skip this check.
 - Slice numbers must be unique; `init` fails closed on a duplicate `## Slice N:`
   because completion tracking keys on the slice id.
-- MC assumes a single controller process per run directory. It does not lock
-  `run.json` or the `current` symlink; do not run two MC commands against the
-  same run concurrently.
+- MC assumes one logical controller for a run, but model-supervised operation
+  may invoke separate commands such as wait, send, finalize, and human stop.
+  Commands that rewrite `run.json` must use a single-writer strategy, such as
+  an advisory lock around read-modify-write. High-frequency observations must
+  be appended to JSONL artifacts instead of repeatedly rewriting `run.json`.
+
+## Supervision State
+
+`supervision.mode` is `deterministic-batch` for the current compatibility path and may be set to `model-supervised` by later runtime primitives. The policy fields describe defaults and budgets; they do not by themselves authorize accepting a slice.
+
+`pause_policy` names the intended operational policy:
+
+- rolling usage limits: wait until reset plus buffer when evidence is clear and the harness process is still resumable
+- weekly, monthly, account, billing, and unknown limits: stop for the user
+- transient service unavailable: bounded retry
+- unknown operational event: stop for the user
+
+Pause budget fields:
+
+- `default_reset_buffer_seconds`: buffer added after a clear reset time
+- `max_single_pause_seconds`: maximum one pause may wait
+- `max_consecutive_pauses_per_slice`: maximum repeated pauses in the same slice
+- `max_cumulative_pause_seconds_per_run`: maximum total paused time in the run
+- `pause_counters.consecutive_pauses_current_slice`: count for the active slice
+- `pause_counters.cumulative_pause_seconds_run`: total paused seconds for the run
+
+Existing run files without `supervision` or `operational_events_path` load with these defaults. Loading defaults must remain backwards-compatible and must not mark old completed slice entries incomplete.
+
+## Operational Events
+
+`operational_events_path` points at an append-only JSONL file. Later model-supervised primitives should append observations, waits, sends, pauses, resumes, retries, hard-stop detections, finalization attempts, and stop-with-evidence records there.
+
+Example line:
+
+```json
+{
+  "event_id": "op-0001",
+  "slice_id": "Slice 1",
+  "attempt": 1,
+  "kind": "usage_limit",
+  "subtype": "rolling_window",
+  "status": "handled",
+  "detected_at": "2026-07-04T01:40:00Z",
+  "evidence_path": ".ai-mc/runs/20260704T013000Z/slices/slice-001/pane-capture-live-latest.txt",
+  "evidence_excerpt": "session limit reached and will reset at 6:30pm",
+  "decision": "pause-until",
+  "decided_by": "mc-model",
+  "resume_at": "2026-07-04T08:33:00Z",
+  "action_taken": "sent continuation prompt",
+  "notes": ""
+}
+```
+
+Append-only event writes must not rewrite unrelated `run.json` state.
+
+## Current Slice
+
+`current_slice.before_head` records the commit at the beginning of the active slice attempt. This is mandatory for later `finalize-slice` implementations because out-of-process finalization must compare changed files against the real slice start. Guessing `HEAD^` can miss earlier commits made by the same slice.
+
+`current_slice.pause` is either `null` or:
+
+```json
+{
+  "paused_until": "2026-07-04T08:33:00Z",
+  "reason": "rolling usage limit reset",
+  "evidence_event_id": "op-0001"
+}
+```
 
 ## Slice Entry
 

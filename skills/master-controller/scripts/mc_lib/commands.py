@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import shlex
 import shutil
@@ -10,8 +11,11 @@ from typing import Any
 
 from .constants import (
     COMPLETED_SLICE_STATUSES,
+    DEFAULT_SUPERVISION,
     HARNESS_PROFILES,
+    OPERATIONAL_EVENTS_FILENAME,
     PARSER_NAME,
+    RUN_ACTIVE_STATUSES,
     RUN_STOP_STATUSES,
     SCHEMA_VERSION,
 )
@@ -53,6 +57,7 @@ from .state import (
     idle_status_after_pass,
     load_run,
     normalize_stop_status,
+    operational_events_file,
     previous_completed_head,
     relative_artifact_path,
     resolve_run_dir,
@@ -126,6 +131,8 @@ def init_run(args: argparse.Namespace) -> int:
             "sha256": plan_digest(plan),
         },
         "current_slice": None,
+        "supervision": copy.deepcopy(DEFAULT_SUPERVISION),
+        "operational_events_path": relative_artifact_path(repo, run_dir / OPERATIONAL_EVENTS_FILENAME),
         "slices": [],
         "stop_reason": None,
     }
@@ -155,6 +162,16 @@ def status(args: argparse.Namespace) -> int:
         harness_line += f" (requested model: {harness['model_requested']})"
     print(f"Harness: {harness_line}")
     print(f"Completed slices: {len(completed_slice_ids(state))}/{state['plan']['slice_count']}")
+    supervision = state.get("supervision", {})
+    print(f"Supervision mode: {supervision.get('mode', 'unknown')}")
+    print(f"Operational events: {operational_events_file(repo, state)}")
+    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+    if current:
+        print(f"Current slice: {current.get('slice_id')} - {current.get('title')}")
+        print(f"Current before_head: {current.get('before_head')}")
+        pause = current.get("pause") if isinstance(current.get("pause"), dict) else None
+        if pause:
+            print(f"Paused until: {pause.get('paused_until')} ({pause.get('reason', 'no reason recorded')})")
     if state.get("stop_reason"):
         print(f"Stop reason: {state['stop_reason']}")
     return 0
@@ -166,6 +183,15 @@ def summarize(args: argparse.Namespace) -> int:
     completed = completed_slice_ids(state)
     print(f"MC run {state['run_id']} summary")
     print(f"Status: {state['status']}")
+    supervision = state.get("supervision", {})
+    print(f"Supervision mode: {supervision.get('mode', 'unknown')}")
+    if state["status"] in RUN_ACTIVE_STATUSES:
+        current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+        if current:
+            print(f"Current slice: {current.get('slice_id')} - {current.get('title')}")
+            pause = current.get("pause") if isinstance(current.get("pause"), dict) else None
+            if pause:
+                print(f"Paused until: {pause.get('paused_until')} ({pause.get('reason', 'no reason recorded')})")
     if state["status"] == "partial":
         plan = resolve_plan(Path(state["plan_path"]))
         verify_plan_unchanged(state, plan)

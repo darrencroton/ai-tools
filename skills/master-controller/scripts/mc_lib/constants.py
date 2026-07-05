@@ -18,9 +18,30 @@ REQUIRED_SECTIONS = (
 )
 COMPLETED_SLICE_STATUSES = {"pass", "committed", "complete"}
 ORCHESTRATOR_STATUSES = {"pass", "repairable", "needs-human", "fail", "blocked"}
+RUN_ACTIVE_STATUSES = {"initialized", "running", "paused", "resuming", "partial"}
 RUN_STOP_STATUSES = {"needs-human", "blocked", "failed", "cancelled"}
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_POLL_SECONDS = 2.0
+OPERATIONAL_EVENTS_FILENAME = "operational-events.jsonl"
+DEFAULT_SUPERVISION: dict[str, Any] = {
+    "mode": "deterministic-batch",
+    "pause_policy": {
+        "rolling_usage_limit": "wait-until-reset-plus-buffer",
+        "weekly_usage_limit": "stop-for-user",
+        "transient_service_unavailable": "bounded-retry",
+        "unknown_operational_event": "stop-for-user",
+    },
+    "default_resume_prompt": "You were interrupted. Review what you were doing then continue.",
+    "default_reset_buffer_seconds": 180,
+    "max_single_pause_seconds": 21600,
+    "max_consecutive_pauses_per_slice": 2,
+    "max_cumulative_pause_seconds_per_run": 43200,
+    "max_transient_retries_per_slice": 3,
+    "pause_counters": {
+        "consecutive_pauses_current_slice": 0,
+        "cumulative_pause_seconds_run": 0,
+    },
+}
 
 # User-approved exception (explicit choice via AskUserQuestion, this session):
 # the operator may opt in to these two known unattended-safe launch commands

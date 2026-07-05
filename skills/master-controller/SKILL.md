@@ -5,7 +5,9 @@ description: Supervise execution of an existing implementation-plan by running e
 
 # Master Controller
 
-Use this skill when the user wants a controller to execute an already-approved implementation plan one slice at a time. The master controller (MC) is a supervisor: it creates durable run state, launches a fresh orchestrator session for each eligible slice, verifies the orchestrator's claims, commits only passing slices, and stops when a human decision is required.
+Use this skill when the user wants a controller to execute an already-approved implementation plan one slice at a time. The master controller (MC) is a supervisor backed by deterministic tools: it creates durable run state, launches a fresh orchestrator session for each eligible slice, observes or records harness evidence, verifies the orchestrator's claims, commits only passing slices, and stops when a human decision is required.
+
+MC supports two operating styles. In model-supervised mode, the MC model stays in the loop for operational judgment while deterministic commands own exact state transitions, tmux control, artifact capture, and gate verification. In deterministic batch mode, MC runs conservatively without live model judgment and stops fail-closed when evidence is missing or unclear.
 
 Do not use this skill to create, repair, broaden, or materially amend an implementation plan. Planning belongs to `implementation-plan`. If the plan is missing, ambiguous, incomplete, or needs material edits, MC stops and reports that a separate planning step is required.
 
@@ -26,23 +28,34 @@ Docker and container setup are out of scope. MC may run inside a container or on
 
 1. **Initialize** - create `.ai-mc/runs/<timestamp>/run.json` in the target repo and update `.ai-mc/current`.
 2. **Check eligibility** - parse the plan, identify the next uncompleted slice, and fail closed on missing sections, approval-needed risk flags, or incomplete authorized surfaces.
-3. **Run one slice** - launch a fresh tmux-backed harness session for one eligible slice.
-4. **Capture artifacts** - preserve prompt, transcript or pane capture, git status, diff, validation summary, drift audit, code review, commit data, and structured orchestrator result.
+3. **Run or supervise one slice** - launch a fresh tmux-backed harness session for one eligible slice. In model-supervised operation, keep the MC model in the loop to observe live pane/log/json/git evidence and choose safe operational actions.
+4. **Capture artifacts** - preserve prompt, transcript or pane capture, git status, diff, validation summary, drift audit, code review, commit data, operational events when present, and structured orchestrator result.
 5. **Verify gates** - independently compare the orchestrator result to git state, plan authorization, validation, drift audit verdict, review verdict, and commit state.
 6. **Advance or stop** - move to the next slice only when every gate passes. Stop with a precise reason for human approval, drift, failed validation, failed review, harness failure, or incomplete evidence.
 
-The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries.
+The CLI supports state creation, dry-run eligibility checks, one-slice tmux execution, structured artifact capture, MC-side gate verification, sequential remaining-slice execution, cancellation, and summaries. Model-supervised primitives for observing, sending, waiting, pausing, and finalizing are part of the documented contract for this transition; until each primitive is implemented, use only commands listed by the current CLI and keep deterministic acceptance gates unchanged.
 
 ## Default Operating Path
 
-When the user gives MC a complete implementation plan and asks to implement it, do not require them to restate the whole launch recipe. Use this default path unless they specify a different scope, harness, or worker set:
+When the user gives MC a complete implementation plan and asks to implement it, do not require them to restate the whole launch recipe. First decide whether the request needs model-supervised operational judgment or deterministic batch execution. Use model-supervised operation when live recovery from quota/session/service interruptions matters; use deterministic batch execution for simple fail-closed runs.
+
+Current deterministic batch path:
 
 1. Use `codex` as the default orchestrator harness when no harness is specified.
 2. Initialize an MC run if `.ai-mc/current` is missing or is for a different plan; otherwise reuse the current run after checking status.
 3. Run `preflight` before the first slice. Include `--worker-tools <tool[,tool]>` when the plan or user requires workers, and include `--allow-profile-command` for normal local execution.
 4. Run `run-next --dry-run` and confirm the selected slice is eligible.
-5. If the user requested one slice, run `run-next`. If the user requested the plan or all remaining work, run `run --scope remaining`.
+5. If the user requested one slice, run `run-next`. If the user requested the plan or all remaining work and deterministic batch execution is appropriate, run `run --scope remaining`.
 6. After the run stops or completes, run `summarize`, inspect `run.json`, inspect the selected slice artifact directories, and check git status before reporting.
+
+Model-supervised path once the primitive commands are available:
+
+1. Initialize or reuse the run, run preflight, and dry-run the next slice.
+2. Start the next eligible slice through the MC primitive that returns control immediately.
+3. Observe live pane/log/json/git evidence on a calm cadence.
+4. If the harness reports a clear rolling 5-hour usage reset and the process is still alive, pause until reset plus buffer, re-observe for hard-stop prompts, then send a short continuation prompt.
+5. If a structured result appears, finalize through deterministic MC gates before advancing.
+6. Stop with evidence for weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, approval-gated, ambiguous, or policy-sensitive conditions.
 
 Ask the user only when required information cannot be inferred safely, such as the target repo, plan path, intended branch, whether to run one slice or all remaining slices, or whether an approval-gated slice should proceed. Do not ask the user to hand-compose harness sandbox flags; use MC profiles and preflight instead.
 
@@ -60,6 +73,10 @@ MC must stop on:
 - Harness, tmux, timeout, transcript, or artifact capture failure.
 - Any proposed destructive filesystem action outside the target repo/worktree.
 - Secret exposure, credential prompt, dependency/license change, remote push, release, deploy, or external side effect not explicitly authorized.
+- Weekly, monthly, account, or billing usage caps.
+- Ambiguous operational interruptions after reasonable observation.
+
+MC may recover from a rolling 5-hour usage window, temporary service interruption, or similar transient only when pane/log evidence is clear, the recovery is bounded, the same slice contract remains in force, no hard-stop prompt is visible, and incomplete work is not accepted as passing. Operational screen text can guide wait, retry, resume, or stop decisions; it can never accept a slice.
 
 MC decisions must not rely only on natural-language transcript interpretation. The orchestrator must produce `orchestrator-result.json`, and MC must verify claims against local evidence.
 
@@ -91,6 +108,8 @@ python3 skills/master-controller/scripts/mc.py reconcile --repo <path>
 python3 skills/master-controller/scripts/mc.py stop --repo <path> --reason <reason>
 python3 skills/master-controller/scripts/mc.py archive-sensitive --repo <path> --dry-run
 ```
+
+Planned model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `start-slice`, `finalize-slice`, and `stop-with-evidence`. They must preserve the same trust boundary: the MC model may reason over operational evidence, but acceptance still requires deterministic local gates.
 
 Runtime commands require `tmux`, the selected harness command, and a clean target worktree outside MC's `.ai-mc/` audit directory. MC starts a fresh tmux session for every slice and stops rather than advancing when evidence is missing or a gate fails and cannot be safely reconciled from local evidence.
 
