@@ -284,14 +284,19 @@ def extract_operational_hints(
                 )
             )
 
+        external_side_effect_pattern = (
+            r"\b(?:do you want to|approve|confirm|allow|permission to|shall i|should i|ready to)\b"
+            r"[^.\n?]{0,120}\b(?:push(?: to remote)?|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|"
+            r"deploy|release|publish|install (?:a )?dependenc(?:y|ies)|change (?:the )?license|license change)\b"
+            r"|"
+            r"\b(?:push to remote|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|deploy|release|publish|"
+            r"install (?:a )?dependenc(?:y|ies)|license change)\b[^.\n]{0,60}(?:\?|yes/no|\[y/n\]|approve|confirm)"
+        )
         for kind, pattern in (
             ("auth_required", r"\b(?:login required|please log in|sign in|enter api key|enter password|mfa|two-factor)\b"),
             ("trust_prompt", r"\b(?:do you trust the (?:contents|files)|trust this (?:directory|folder|repo))\b"),
             ("permission_prompt", r"\b(?:permission denied|grant permission|requires permission|allow access)\b"),
-            (
-                "external_side_effect_request",
-                r"\b(?:push to remote|create pull request|deploy|release|publish|install dependency|license change)\b",
-            ),
+            ("external_side_effect_request", external_side_effect_pattern),
         ):
             match = re.search(pattern, lowered)
             if match:
@@ -435,7 +440,7 @@ def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
 
 def seed_worker_credentials(paths: dict[str, Path], worker_tools: tuple[str, ...], orchestrator_harness_name: str) -> list[str]:
     warnings: list[str] = []
-    home_by_tool = {"codex": "codex_home", "claude": "claude_config_dir"}
+    home_by_tool = {"codex": "codex_home"}
     for tool, home_key in home_by_tool.items():
         if tool not in worker_tools or tool == orchestrator_harness_name:
             continue
@@ -484,16 +489,36 @@ def slice_environment(
         "TMPDIR": str(paths["tmp_dir"]),
     }
     # Only redirect a tool's own home when that tool is a *worker* for this
-    # run, and never when it is also the orchestrator harness itself: codex
-    # and claude can both be orchestrators, and clobbering the orchestrator's
-    # own home/auth with an isolated (and possibly unseeded) per-slice
-    # directory would break the orchestrator, not just a worker. Copilot is
-    # never an MC orchestrator, so COPILOT_HOME above is always safe to set.
+    # run, and never when it is also the orchestrator harness itself. Codex
+    # worker auth is currently portable via auth.json. Claude Code subscription
+    # OAuth is not portable by copying .credentials.json into CLAUDE_CONFIG_DIR,
+    # so MC deliberately leaves Claude workers on the operator's normal config
+    # unless the caller supplied standard Claude auth environment variables.
+    # Copilot is never an MC orchestrator, so COPILOT_HOME above is always safe
+    # to set.
     if "codex" in worker_tools and orchestrator_harness_name != "codex":
         env["CODEX_HOME"] = str(paths["codex_home"])
-    if "claude" in worker_tools and orchestrator_harness_name != "claude":
-        env["CLAUDE_CONFIG_DIR"] = str(paths["claude_config_dir"])
     return env
+
+
+def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
+    if not worker_tools:
+        return "No worker tool is configured for this run."
+    policies: list[str] = []
+    if "copilot" in worker_tools:
+        policies.append("Copilot gets an isolated per-slice COPILOT_HOME for writable session state.")
+    if "codex" in worker_tools:
+        policies.append("Codex gets an isolated per-slice CODEX_HOME seeded with auth.json when Codex is a worker and not the orchestrator.")
+    if "claude" in worker_tools:
+        policies.append(
+            "Claude workers use the operator's normal Claude Code auth/config; MC does not set CLAUDE_CONFIG_DIR because "
+            "copying .credentials.json into an isolated config dir is not a valid portable login. For non-interactive "
+            "isolated auth, provide ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN in the environment."
+        )
+    unknown = [tool for tool in worker_tools if tool not in {"copilot", "codex", "claude"}]
+    for tool in unknown:
+        policies.append(f"{tool} uses its configured profile; no credential isolation policy is defined by MC.")
+    return " ".join(policies)
 
 
 def load_prompt_template() -> str:
@@ -532,6 +557,7 @@ def render_orchestrator_prompt(
         "copilot_home": str(paths["copilot_home"]),
         "codex_home": str(paths["codex_home"]),
         "claude_config_dir": str(paths["claude_config_dir"]),
+        "worker_auth_policy": worker_auth_policy_text(worker_tools),
         "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,

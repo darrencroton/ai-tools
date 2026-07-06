@@ -320,6 +320,53 @@ class MasterControllerTests(unittest.TestCase):
         self.assertEqual(state["supervision"]["pause_counters"]["cumulative_pause_seconds_run"], 0)
         self.assertEqual(state["operational_events_path"], f".ai-mc/runs/{state['run_id']}/operational-events.jsonl")
 
+    def test_init_can_create_and_switch_to_authorized_branch(self):
+        self.prepare_committed_repo()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            branch="mc-trial/pi-calculator",
+            create_branch=True,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+
+        self.assertEqual(git(self.repo, "branch", "--show-current"), "mc-trial/pi-calculator")
+        state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["branch"], "mc-trial/pi-calculator")
+
+    def test_init_requires_authorization_to_create_missing_branch(self):
+        self.prepare_committed_repo()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            branch="missing-branch",
+            create_branch=False,
+        )
+
+        with self.assertRaisesRegex(mc.McError, "does not exist"):
+            mc.init_run(args)
+
+    def test_init_refuses_branch_switch_from_dirty_worktree(self):
+        self.prepare_committed_repo()
+        (self.repo / "pi_calculator.py").write_text("dirty\n", encoding="utf-8")
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            branch="mc-trial/pi-calculator",
+            create_branch=True,
+        )
+
+        with self.assertRaisesRegex(mc.McError, "dirty worktree"):
+            mc.init_run(args)
+
     def test_old_run_state_loads_with_supervision_defaults(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
@@ -763,6 +810,30 @@ Continue later.
             with self.assertRaisesRegex(mc.McError, "hard prompt"):
                 mc.send(args)
         fake_adapter.send_literal.assert_not_called()
+
+    def test_hard_prompt_detection_ignores_mc_safety_text(self):
+        safety_text = (
+            "Commit creation is authorized only after validation. "
+            "Do not push, open a PR, release, deploy, change dependencies/licenses, "
+            "request secrets, or perform destructive actions unless explicitly authorized."
+        )
+
+        hard_prompt = mc.TmuxHarnessAdapter.detect_hard_prompt(safety_text)
+        self.assertFalse(hard_prompt["present"])
+
+        hints = mc.extract_operational_hints(safety_text, process_running=True, result_exists=False)
+        self.assertFalse(any(hint["kind"] == "external_side_effect_request" for hint in hints))
+
+    def test_hard_prompt_detection_keeps_external_side_effect_prompts(self):
+        prompt = "Approve deploy to production? [y/n]"
+
+        hard_prompt = mc.TmuxHarnessAdapter.detect_hard_prompt(prompt)
+        self.assertTrue(hard_prompt["present"])
+        self.assertIn("external_side_effect_request", hard_prompt["kinds"])
+
+        hints = mc.extract_operational_hints(prompt, process_running=True, result_exists=False)
+        external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
+        self.assertTrue(external["hard_stop"])
 
     def test_operational_hints_parse_rolling_limit_duration(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
@@ -1703,9 +1774,23 @@ Continue later.
         codex_orchestrator_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("codex",))
         self.assertNotIn("CODEX_HOME", codex_orchestrator_env)
 
+        codex_with_claude_worker_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("claude",))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", codex_with_claude_worker_env)
+
         no_worker_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice)
         self.assertNotIn("CODEX_HOME", no_worker_env)
         self.assertNotIn("CLAUDE_CONFIG_DIR", no_worker_env)
+
+    def test_rendered_prompt_states_claude_worker_auth_policy(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        state = self.init_run()
+        artifact_dir = Path("/tmp/artifacts")
+        run_json = Path("/tmp/run.json")
+        prompt = mc.render_orchestrator_prompt(state, plan_slice, artifact_dir, run_json, ("claude",))
+        self.assertIn("Required worker tool(s) for this run: claude", prompt)
+        self.assertIn("Worker auth policy:", prompt)
+        self.assertIn("MC does not set CLAUDE_CONFIG_DIR", prompt)
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", prompt)
 
     def test_profile_command_claude_appends_session_id(self):
         self.prepare_committed_repo()

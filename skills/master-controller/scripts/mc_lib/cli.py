@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--plan", required=True, help="implementation plan markdown file")
     init.add_argument("--harness", required=True, help="harness adapter name")
     init.add_argument("--worktree-root", help="optional worktree root")
+    init.add_argument("--branch", help="intended branch to record for this MC run")
+    init.add_argument(
+        "--create-branch",
+        action="store_true",
+        help="with --branch, create and switch to the branch before initializing when it does not exist",
+    )
     init.set_defaults(func=init_run)
 
     for name, func, help_text in (

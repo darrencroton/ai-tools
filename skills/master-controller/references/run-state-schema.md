@@ -261,7 +261,8 @@ MC sets these environment variables for every slice harness:
 - `MC_TOOL_HOME_ROOT`
 - `COPILOT_HOME`
 - `CODEX_HOME` when Codex is a required worker and not the orchestrator
-- `CLAUDE_CONFIG_DIR` when Claude is a required worker and not the orchestrator
+
+MC does not set `CLAUDE_CONFIG_DIR` for Claude workers. Claude Code subscription OAuth is not portable by copying `.credentials.json` into an isolated config directory; use normal Claude Code auth, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN` for unattended isolated auth.
 
 ## `orchestrator-result.json`
 

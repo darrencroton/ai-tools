@@ -89,6 +89,26 @@ def init_run(args: argparse.Namespace) -> int:
             + ", ".join(str(number) for number in duplicates)
             + " (each slice number must be unique so completion tracking cannot silently skip work)"
         )
+    requested_branch = getattr(args, "branch", None)
+    create_branch = bool(getattr(args, "create_branch", False))
+    if create_branch and not requested_branch:
+        raise McError("--create-branch requires --branch")
+    if requested_branch:
+        dirty = meaningful_status_lines(git_status_text(repo))
+        if dirty:
+            raise McError("cannot switch/create MC branch from dirty worktree outside .ai-mc/: " + "; ".join(dirty))
+        current_branch = git(repo, "branch", "--show-current") or "DETACHED"
+        if current_branch != requested_branch:
+            branch_exists = git_result(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{requested_branch}").returncode == 0
+            if branch_exists:
+                git(repo, "switch", requested_branch)
+            elif create_branch:
+                git(repo, "switch", "-c", requested_branch)
+            else:
+                raise McError(
+                    f"intended branch {requested_branch!r} does not exist; "
+                    "create it first or rerun init with --create-branch"
+                )
     rid = run_id()
     mc_dir = repo / ".ai-mc"
     run_dir = mc_dir / "runs" / rid

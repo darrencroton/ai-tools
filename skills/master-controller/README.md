@@ -39,6 +39,17 @@ python3 skills/master-controller/scripts/mc.py init \
   --harness codex
 ```
 
+Initialize on an explicitly authorized branch, creating it when missing:
+
+```bash
+python3 skills/master-controller/scripts/mc.py init \
+  --repo /path/to/repo \
+  --plan /path/to/plan.md \
+  --harness codex \
+  --branch mc-trial/pi-calculator \
+  --create-branch
+```
+
 Check state:
 
 ```bash
@@ -159,7 +170,7 @@ When a user provides a complete implementation plan and asks MC to implement it,
 Current deterministic batch sequence:
 
 1. Resolve the target repo, plan path, branch, harness, and worker tools from the user request and plan. Default harness is `codex`; worker tools are omitted unless the plan or user requires them.
-2. Initialize a run with `init` if needed, or reuse `.ai-mc/current` only after checking it points at the same repo and plan.
+2. Initialize a run with `init` if needed, or reuse `.ai-mc/current` only after checking it points at the same repo and plan. If the branch is explicitly authorized and not already current, use `init --branch <name>`; add `--create-branch` only when the operator has authorized branch creation.
 3. Run `preflight --allow-profile-command`, adding `--worker-tools <tool[,tool]>` when workers are required.
 4. Run `run-next --dry-run` to verify the next eligible slice and authorized files.
 5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan and batch operation is appropriate.
@@ -251,7 +262,7 @@ The parser fails closed when a required section is missing, when no files are li
 
 Authorized file entries are matched with segment-aware globbing: a plain path matches exactly, a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
 
-The plan is frozen at `init` by content digest. If the plan file changes mid-run, MC stops before the next slice; a revised plan requires a fresh `init`. Duplicate `## Slice N:` numbers are rejected at `init`, and each runtime slice re-checks that the current branch still matches the branch captured at `init`.
+The plan is frozen at `init` by content digest. If the plan file changes mid-run, MC stops before the next slice; a revised plan requires a fresh `init`. Duplicate `## Slice N:` numbers are rejected at `init`, and each runtime slice re-checks that the current branch still matches the branch captured at `init`. `init --branch <name>` records and switches to an intended branch before the run; `--create-branch` creates it only when explicitly requested and only from a clean worktree.
 
 ## Model-Supervised State Contract
 

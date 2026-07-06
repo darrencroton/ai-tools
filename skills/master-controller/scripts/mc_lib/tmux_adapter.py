@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import time
@@ -50,13 +51,20 @@ HARD_PROMPT_MARKERS: dict[str, tuple[str, ...]] = {
     "external_side_effect_request": (
         "push to remote",
         "create pull request",
-        "deploy",
-        "release",
-        "publish",
         "install dependency",
         "license change",
     ),
 }
+
+EXTERNAL_SIDE_EFFECT_PROMPT_RE = re.compile(
+    r"\b(?:do you want to|approve|confirm|allow|permission to|shall i|should i|ready to)\b"
+    r"[^.\n?]{0,120}\b(?:push(?: to remote)?|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|"
+    r"deploy|release|publish|install (?:a )?dependenc(?:y|ies)|change (?:the )?license|license change)\b"
+    r"|"
+    r"\b(?:push to remote|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|deploy|release|publish|"
+    r"install (?:a )?dependenc(?:y|ies)|license change)\b[^.\n]{0,60}(?:\?|yes/no|\[y/n\]|approve|confirm)",
+    re.IGNORECASE,
+)
 
 
 class TmuxHarnessAdapter:
@@ -152,6 +160,13 @@ class TmuxHarnessAdapter:
             "markers": [],
         }
         for kind, markers in HARD_PROMPT_MARKERS.items():
+            if kind == "external_side_effect_request":
+                match = EXTERNAL_SIDE_EFFECT_PROMPT_RE.search(capture)
+                if match:
+                    matches["present"] = True
+                    matches["kinds"].append(kind)
+                    matches["markers"].append(match.group(0).strip())
+                continue
             for marker in markers:
                 if marker.lower() in lowered:
                     matches["present"] = True

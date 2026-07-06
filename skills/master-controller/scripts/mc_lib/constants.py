@@ -82,8 +82,9 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
             "As orchestrator, launched with --session-id so MC can capture the full JSONL transcript "
             "as orchestrator-transcript.jsonl (pane capture alone loses detail behind Claude Code's "
             "'ctrl+o to expand' collapsing).",
-            "When used as a worker (not orchestrator), gets a per-slice CLAUDE_CONFIG_DIR seeded with a "
-            "copy of the real .credentials.json, since Claude Code's home dir doubles as its credential store.",
+            "When used as a worker (not orchestrator), uses the operator's normal Claude Code auth/config unless "
+            "standard Claude auth environment variables are provided; copying .credentials.json into an isolated "
+            "CLAUDE_CONFIG_DIR is not portable.",
         ],
     },
     "copilot": {
@@ -106,16 +107,14 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
 
 SENSITIVE_ARTIFACT_NAMES = {"copilot-home", "codex-home", "claude-config-dir", "tool-homes"}
 
-# Worker-tool home directories are not interchangeable: Copilot's real GitHub
+# Worker-tool home directories are not interchangeable. Copilot's real GitHub
 # credential lives outside ~/.copilot (gh CLI config / OS keychain), so
 # redirecting COPILOT_HOME to an isolated per-slice directory only needs a
-# writable dir. Codex's auth.json and Claude Code's .credentials.json live
-# directly inside their respective home directories, so isolating those homes
-# for a worker requires seeding the credential file first or the worker gets a
-# 401. Map each tool that needs seeding to (env var MC/the operator uses for
-# this tool's home, real home dirname fallback when the env var is unset,
-# credential filename to copy into the isolated per-slice home).
+# writable dir. Codex's auth.json is portable enough for the local MC worker
+# profile and can be copied into per-slice CODEX_HOME. Claude Code's subscription
+# OAuth state is not safely reproduced by copying ~/.claude/.credentials.json
+# into an isolated CLAUDE_CONFIG_DIR; use the operator's normal Claude config or
+# standard Claude auth environment variables instead.
 WORKER_CREDENTIAL_HOMES: dict[str, tuple[str, str, str]] = {
     "codex": ("CODEX_HOME", ".codex", "auth.json"),
-    "claude": ("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json"),
 }

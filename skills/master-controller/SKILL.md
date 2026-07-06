@@ -42,7 +42,7 @@ When the user gives MC a complete implementation plan and asks to implement it, 
 Current deterministic batch path:
 
 1. Use `codex` as the default orchestrator harness when no harness is specified.
-2. Initialize an MC run if `.ai-mc/current` is missing or is for a different plan; otherwise reuse the current run after checking status.
+2. Initialize an MC run if `.ai-mc/current` is missing or is for a different plan; otherwise reuse the current run after checking status. When the user has authorized a specific branch and it is not already current, pass `--branch <name>`; add `--create-branch` only when branch creation is explicitly authorized.
 3. Run `preflight` before the first slice. Include `--worker-tools <tool[,tool]>` when the plan or user requires workers, and include `--allow-profile-command` for normal local execution.
 4. Run `run-next --dry-run` and confirm the selected slice is eligible.
 5. If the user requested one slice, run `run-next`. If the user requested the plan or all remaining work and deterministic batch execution is appropriate, run `run --scope remaining`.
@@ -50,7 +50,7 @@ Current deterministic batch path:
 
 Model-supervised path:
 
-1. Initialize or reuse the run, run preflight, and dry-run the next slice.
+1. Initialize or reuse the run, run preflight, and dry-run the next slice. When the user has authorized a specific branch and it is not already current, initialize with `--branch <name>` and, if explicitly authorized, `--create-branch`.
 2. Start the next eligible slice with `start-slice`; do not use `run --scope remaining` for model-supervised operation.
 3. Observe live pane/log/json/git evidence with `observe` or bounded `wait` on a calm cadence.
 4. If the harness reports a clear rolling 5-hour usage reset and the process is still alive, pause until reset plus buffer with `pause-until`, re-observe for hard-stop prompts, then send a short continuation prompt with `send`.
@@ -100,6 +100,7 @@ Trust boundary for audit verdicts: MC recomputes the highest-risk gate itself â€
 
 ```bash
 python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name>
+python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name> --branch <branch> --create-branch
 python3 skills/master-controller/scripts/mc.py profiles
 python3 skills/master-controller/scripts/mc.py preflight --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py status --repo <path>
