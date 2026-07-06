@@ -107,7 +107,7 @@ python3 skills/master-controller/scripts/mc.py status --repo <path>
 python3 skills/master-controller/scripts/mc.py summarize --repo <path>
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --dry-run
 python3 skills/master-controller/scripts/mc.py run-next --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
-python3 skills/master-controller/scripts/mc.py run-next --repo <path> --harness-model <model> --worker-tools <tool[,tool]> --allow-profile-command
+python3 skills/master-controller/scripts/mc.py run-next --repo <path> --harness-model <model> --harness-effort <effort> --worker-tools <tool[,tool]> --worker-model <model> --worker-effort <effort> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py run --repo <path> --scope remaining --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py start-slice --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py observe --repo <path>

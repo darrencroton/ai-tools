@@ -61,10 +61,17 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     "codex": {
         "roles": ["orchestrator", "senior-worker"],
         "base_command": ["codex", "--no-alt-screen", "-s", "workspace-write", "-a", "never"],
+        "model_flag": "-m",
+        "effort_config_key": "model_reasoning_effort",
         "worker_network_flag": ["-c", "sandbox_workspace_write.network_access=true"],
         "commit_git_access_flag": "--add-dir",
+        "worker_command_notes": [
+            "For Codex workers, use `-m <model>` for model and `-c model_reasoning_effort=\"<effort>\"` for effort.",
+            "`codex exec` does not accept approval-policy flags such as `-a never`; use sandbox flags such as `--sandbox read-only`.",
+        ],
         "notes": [
             "Use --no-alt-screen for durable tmux captures.",
+            "Optional MC profile model and effort overrides are composed as -m and -c model_reasoning_effort=... .",
             "Worker-backed runs need sandbox network access.",
             "Commit-required runs need scoped write access to the repository git directory.",
             "When used as a worker (not orchestrator), gets a per-slice CODEX_HOME seeded with a copy of the "
@@ -76,6 +83,9 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "base_command": ["claude", "--permission-mode", "auto"],
         "model_flag": "--model",
         "effort_flag": "--effort",
+        "worker_command_notes": [
+            "For Claude workers, use `--model <model>` for model and `--effort <effort>` for effort.",
+        ],
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
             "Optional MC profile model and effort overrides are composed while preserving --session-id transcript capture.",
@@ -91,8 +101,14 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     "copilot": {
         "roles": ["junior-worker"],
         "base_command": ["copilot"],
+        "model_flag": "--model",
+        "effort_flag": "--effort",
+        "worker_command_notes": [
+            "For Copilot workers, use `--model <model>` for model and `--effort <effort>` for effort.",
+        ],
         "notes": [
             "Copilot is a worker profile only; it is not an MC orchestrator harness.",
+            "Copilot CLI supports model and effort flags for worker commands, but MC has no tested Copilot orchestrator readiness contract yet.",
             "Use a per-slice COPILOT_HOME for sandboxed session state.",
         ],
     },

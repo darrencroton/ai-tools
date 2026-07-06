@@ -21,7 +21,7 @@
 
 ## Config Discovery
 
-Read `~/.copilot/config.json` for the user's model (`model` key if present), but do not rely on Copilot's implicit default staying stable across CLI versions or sessions.
+Read `~/.copilot/config.json` for the user's model (`model` key if present), but do not rely on Copilot's implicit default staying stable across CLI versions or sessions. Use `--effort <level>` when the user or supervising workflow specifies an effort level.
 Inspect the current model list from the CLI:
 
 ```bash
@@ -36,13 +36,13 @@ Launch all Copilot worker runs via [../scripts/worker_jobs.py](../scripts/worker
 
 ```bash
 # Non-interactive execution worker command
-copilot --model <model> -p "PROMPT" --allow-all-tools --autopilot --silent --add-dir <dir>
+copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --autopilot --silent --add-dir <dir>
 
 # Low-stakes web research worker command
-copilot --model <model> -p "PROMPT" --allow-all-tools --allow-all-urls --autopilot --silent --add-dir <dir>
+copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --allow-all-urls --autopilot --silent --add-dir <dir>
 
 # GitHub operations worker command (with MCP tools)
-copilot --model <model> -p "PROMPT" --allow-all-tools --add-github-mcp-toolset all --autopilot --silent --add-dir <dir>
+copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --add-github-mcp-toolset all --autopilot --silent --add-dir <dir>
 
 # Resume most recent session
 copilot --continue --allow-all-tools
@@ -82,6 +82,7 @@ Use `worker_jobs.py extract` when you want the final answer or section filtering
 |---|---|
 | `-p / --prompt` | Non-interactive prompt string |
 | `--model` | Any valid model string |
+| `--effort` / `--reasoning-effort` | Reasoning effort level when explicitly requested by the user or supervising workflow |
 | `--allow-all-tools` | All tools without confirmation; required for non-interactive |
 | `--allow-all-urls` | Allow access to all URLs without confirmation |
 | `--autopilot` | Enables continuation without user interaction |

@@ -552,7 +552,26 @@ Continue later.
         self.assertIn("Required worker model for this run: gpt-5.5", prompt)
         self.assertIn("Required worker effort for this run: low", prompt)
         self.assertIn('model_reasoning_effort="<effort>"', prompt)
-        self.assertIn("does not accept an approval-policy flag", prompt)
+        self.assertIn("does not accept approval-policy flags", prompt)
+
+    def test_prompt_rendering_uses_profile_guidance_for_worker_model_and_effort(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        plan_slice = mc.parse_plan(self.plan)[0]
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+        prompt = mc.render_orchestrator_prompt(
+            state,
+            plan_slice,
+            slice_artifact_dir,
+            run_json,
+            ("claude", "copilot"),
+            "some-model",
+            "medium",
+        )
+        self.assertIn("Worker model/effort guidance:", prompt)
+        self.assertIn("- claude: For Claude workers, use `--model <model>`", prompt)
+        self.assertIn("`--effort <effort>`", prompt)
+        self.assertIn("- copilot: For Copilot workers, use `--model <model>`", prompt)
 
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
@@ -585,17 +604,21 @@ Continue later.
         parts = shlex.split(command)
         self.assertEqual(parts, ["claude", "--permission-mode", "auto", "--model", "sonnet", "--session-id", "fixed-session-id"])
 
-    def test_unsupported_profile_model_override_fails_closed(self):
+    def test_codex_profile_command_composes_model_override(self):
         self.prepare_committed_repo()
         state = self.init_run()
-        with self.assertRaisesRegex(mc.McError, "does not support"):
-            mc.profile_command("codex", self.repo, state, (), harness_model="some-model")
+        command = mc.profile_command("codex", self.repo, state, (), harness_model="some-model")
+        parts = shlex.split(command)
+        self.assertIn("-m", parts)
+        self.assertEqual(parts[parts.index("-m") + 1], "some-model")
 
-    def test_unsupported_profile_effort_override_fails_closed(self):
+    def test_codex_profile_command_composes_effort_override(self):
         self.prepare_committed_repo()
         state = self.init_run()
-        with self.assertRaisesRegex(mc.McError, "does not support"):
-            mc.profile_command("codex", self.repo, state, (), harness_effort="medium")
+        command = mc.profile_command("codex", self.repo, state, (), harness_effort="medium")
+        parts = shlex.split(command)
+        self.assertIn("-c", parts)
+        self.assertIn('model_reasoning_effort="medium"', parts)
 
     def test_harness_model_requires_profile_command(self):
         self.prepare_committed_repo()

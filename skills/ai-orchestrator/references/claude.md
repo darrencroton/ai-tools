@@ -19,7 +19,7 @@
 
 ## Config Discovery
 
-Read `~/.claude/settings.json` for relevant user defaults if present. If no model is configured there, omit `--model` and let Claude Code use its default. Never hardcode model names.
+Read `~/.claude/settings.json` for relevant user defaults if present. If no model is configured there, omit `--model` and let Claude Code use its default. Use `--effort <level>` when the user or supervising workflow specifies an effort level. Never hardcode model names.
 
 ## Core Commands
 
@@ -27,10 +27,10 @@ Launch all Claude worker runs via [../scripts/worker_jobs.py](../scripts/worker_
 
 ```bash
 # Edit task worker command
-claude -p "PROMPT" --permission-mode acceptEdits --output-format text --add-dir <dir>
+claude -p "PROMPT" [--model <model>] [--effort <level>] --permission-mode acceptEdits --output-format text --add-dir <dir>
 
 # Read-only review / plan review worker command
-claude -p "PROMPT" --permission-mode plan --output-format text --add-dir <dir>
+claude -p "PROMPT" [--model <model>] [--effort <level>] --permission-mode plan --output-format text --add-dir <dir>
 
 # Resume most recent session in the current directory
 claude --continue
@@ -67,6 +67,7 @@ Use `worker_jobs.py extract` when you want the clean final answer. Use `worker_j
 |---|---|
 | `-p / --print` | Non-interactive prompt string |
 | `--model` | Any valid model string; omit to use the CLI default |
+| `--effort` | Reasoning effort level when explicitly requested by the user or supervising workflow |
 | `--permission-mode` | Use `acceptEdits` for edit tasks, `plan` for read-only review |
 | `--output-format` | `text`, `json`, `stream-json` |
 | `--add-dir` | Additional directory to permit tool access to |

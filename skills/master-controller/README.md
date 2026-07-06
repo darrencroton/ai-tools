@@ -87,6 +87,19 @@ python3 skills/master-controller/scripts/mc.py run-next \
   --allow-profile-command
 ```
 
+Run with explicit orchestrator and worker model/effort requests:
+
+```bash
+python3 skills/master-controller/scripts/mc.py run-next \
+  --repo /path/to/repo \
+  --harness-model <model> \
+  --harness-effort <effort> \
+  --worker-tools codex \
+  --worker-model <model> \
+  --worker-effort <effort> \
+  --allow-profile-command
+```
+
 Run eligible slices until all are complete or a stop condition is reached:
 
 ```bash
@@ -176,7 +189,7 @@ Current deterministic batch sequence:
 5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan and batch operation is appropriate.
 6. Run `summarize`, inspect `run.json`, inspect slice artifacts, and check git status before reporting.
 
-Do not ask users to hand-compose Codex or Claude sandbox flags. Use `profiles`, `preflight`, `--worker-tools`, and `--allow-profile-command` so MC chooses the tested launch path from tool capabilities plus run requirements.
+Do not ask users to hand-compose harness sandbox, model, or effort flags. Use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command` so MC chooses the tested launch path and renders worker guidance from tool capabilities plus run requirements.
 
 Model-supervised sequence:
 
@@ -201,6 +214,8 @@ At runtime, MC composes the launch command from the selected harness plus explic
 
 - `--worker-tools copilot` tells MC the slice will use a Copilot worker and the harness needs worker-compatible setup.
 - `--allow-profile-command` tells MC to use the tested profile command instead of requiring a hand-written `--harness-command`.
+- `--harness-model` and `--harness-effort` are composed by MC only when the selected orchestrator profile supports them.
+- `--worker-model` and `--worker-effort` are rendered into the slice prompt with per-tool command guidance; the orchestrator must preserve worker evidence and stop if the selected worker cannot honor them.
 - `commit_required=true` in run policy tells the Codex profile to add scoped git-directory access for local commits.
 
 This avoids a large matrix of incomplete names such as `codex-copilot-commit`. The role information stays with each tool profile, and the slice requirements are visible on the command line.

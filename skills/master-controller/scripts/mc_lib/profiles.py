@@ -20,6 +20,34 @@ def harness_supports_role(harness_name: str, role: str) -> bool:
     return role in HARNESS_PROFILES.get(harness_name, {}).get("roles", [])
 
 
+def _append_model_override(command: list[str], profile: dict[str, Any], model: str | None, tool_name: str) -> None:
+    if not model:
+        return
+    model_flag = profile.get("model_flag")
+    model_config_key = profile.get("model_config_key")
+    if model_flag:
+        command.extend([str(model_flag), model])
+        return
+    if model_config_key:
+        command.extend(["-c", f'{model_config_key}="{model}"'])
+        return
+    raise McError(f"harness profile {tool_name!r} does not support MC-composed model overrides")
+
+
+def _append_effort_override(command: list[str], profile: dict[str, Any], effort: str | None, tool_name: str) -> None:
+    if not effort:
+        return
+    effort_flag = profile.get("effort_flag")
+    effort_config_key = profile.get("effort_config_key")
+    if effort_flag:
+        command.extend([str(effort_flag), effort])
+        return
+    if effort_config_key:
+        command.extend(["-c", f'{effort_config_key}="{effort}"'])
+        return
+    raise McError(f"harness profile {tool_name!r} does not support MC-composed effort overrides")
+
+
 def profile_command(
     harness_name: str,
     repo: Path,
@@ -39,17 +67,8 @@ def profile_command(
     if not command:
         raise McError(f"harness profile {harness_name!r} has no base command")
 
-    if harness_model:
-        model_flag = profile.get("model_flag")
-        if not model_flag:
-            raise McError(f"harness profile {harness_name!r} does not support MC-composed model overrides")
-        command.extend([model_flag, harness_model])
-
-    if harness_effort:
-        effort_flag = profile.get("effort_flag")
-        if not effort_flag:
-            raise McError(f"harness profile {harness_name!r} does not support MC-composed effort overrides")
-        command.extend([effort_flag, harness_effort])
+    _append_model_override(command, profile, harness_model, harness_name)
+    _append_effort_override(command, profile, harness_effort, harness_name)
 
     if harness_name == "codex":
         if worker_tools:

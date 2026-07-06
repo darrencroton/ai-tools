@@ -77,7 +77,11 @@ MC keeps one capability profile per tool, not one profile per role combination. 
 
 This keeps tool-specific instructions together while avoiding many partially tested combinations. For example, the Codex profile adds sandbox network access only when worker tools are requested, and adds scoped git-directory access only when commits are required.
 
-Profile composition also owns supported model overrides. For example, a Claude run that requests a specific model must be composed by MC as `claude --permission-mode auto --model <model> --session-id <generated-id>` so model selection does not bypass transcript capture or other profile-managed launch requirements.
+Profile composition also owns supported orchestrator model and effort overrides. For example, a Claude run that requests a specific model must be composed by MC as `claude --permission-mode auto --model <model> --session-id <generated-id>` so model selection does not bypass transcript capture or other profile-managed launch requirements. A Codex run that requests model and effort is composed from the same profile table as `-m <model>` plus `-c model_reasoning_effort="<effort>"`.
+
+Worker model and effort selection is a prompt-level contract, not a second worker-launch subsystem inside MC. MC renders per-tool worker command guidance from the same profile table, then requires the orchestrator to preserve worker evidence. This keeps `ai-orchestrator` as the single worker-launch abstraction while MC verifies artifacts and stops if the configured model or effort is unsupported.
+
+Copilot currently remains a worker profile only. Its CLI supports model and effort flags, but MC does not promote it to orchestrator until a readiness, trust-prompt, supervision, and transcript-capture contract has been validated.
 
 ## Failure Semantics
 

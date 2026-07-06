@@ -851,6 +851,12 @@ def list_profiles(args: argparse.Namespace) -> int:
         print(f"  roles: {', '.join(profile.get('roles', []))}")
         base = profile.get("base_command") or []
         print(f"  base_command: {shlex.join(base)}")
+        model_override = profile.get("model_flag") or (f"-c {profile['model_config_key']}=..." if profile.get("model_config_key") else "none")
+        effort_override = profile.get("effort_flag") or (f"-c {profile['effort_config_key']}=..." if profile.get("effort_config_key") else "none")
+        print(f"  model_override: {model_override}")
+        print(f"  effort_override: {effort_override}")
+        for note in profile.get("worker_command_notes", []):
+            print(f"  worker: {note}")
         for note in profile.get("notes", []):
             print(f"  - {note}")
     return 0

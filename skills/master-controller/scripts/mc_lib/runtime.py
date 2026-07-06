@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .constants import SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
+from .constants import HARNESS_PROFILES, SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
 from .models import McError, PlanSlice
 
 
@@ -549,6 +549,23 @@ def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
     return " ".join(policies)
 
 
+def worker_model_effort_guidance_text(worker_tools: tuple[str, ...]) -> str:
+    if not worker_tools:
+        return "No worker tool is configured for this run."
+    guidance: list[str] = []
+    for tool in worker_tools:
+        profile = HARNESS_PROFILES.get(tool)
+        if not profile:
+            guidance.append(f"- {tool}: no MC profile guidance is defined.")
+            continue
+        notes = profile.get("worker_command_notes") or []
+        if not notes:
+            guidance.append(f"- {tool}: no worker-specific model/effort guidance is configured.")
+            continue
+        guidance.append(f"- {tool}: " + " ".join(str(note) for note in notes))
+    return "\n".join(guidance)
+
+
 def load_prompt_template() -> str:
     # The extracted template is rendered with str.format in
     # render_orchestrator_prompt, so any literal `{`/`}` added to the template
@@ -588,6 +605,7 @@ def render_orchestrator_prompt(
         "codex_home": str(paths["codex_home"]),
         "claude_config_dir": str(paths["claude_config_dir"]),
         "worker_auth_policy": worker_auth_policy_text(worker_tools),
+        "worker_model_effort_guidance": worker_model_effort_guidance_text(worker_tools),
         "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
         "worker_model": worker_model or "default",
         "worker_effort": worker_effort or "default",

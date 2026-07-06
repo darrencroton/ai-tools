@@ -27,12 +27,14 @@ Claude config dir: {claude_config_dir}
 Required worker tool(s) for this run: {worker_tools}
 Required worker model for this run: {worker_model}
 Required worker effort for this run: {worker_effort}
+Worker model/effort guidance:
+{worker_model_effort_guidance}
 Worker auth policy: {worker_auth_policy}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
 The `Required worker tool(s) for this run` line above is authoritative for which worker tool(s) to use. If the plan's validation-plan prose names a different or additional tool (for example, wording carried over from a previous test run with a different harness/worker combination), use the tool(s) configured for this run instead, and note the discrepancy in `worker-evidence.md`. If it says "none configured for this run", only launch a worker if the plan explicitly requires one, and use your own judgement for an appropriate tool.
-The `Required worker model` and `Required worker effort` lines are authoritative when they are not "default". For Codex workers, include the configured model as `-m <model>` and the configured effort as `-c model_reasoning_effort="<effort>"` in the worker command. `codex exec` does not accept an approval-policy flag such as `-a never`; use the sandbox flag only, for example `--sandbox read-only` for read-only checks. For worker tools that do not support the configured model or effort, stop and report the mismatch in `worker-evidence.md` or `orchestrator-result.json` instead of silently falling back.
+The `Required worker model` and `Required worker effort` lines are authoritative when they are not "default". Apply the `Worker model/effort guidance` for each configured worker tool. For worker tools that do not support the configured model or effort, stop and report the mismatch in `worker-evidence.md` or `orchestrator-result.json` instead of silently falling back.
 The `Worker auth policy` line above is authoritative for worker credential handling. Do not set, unset, or redirect tool home/config variables yourself, and do not invent your own isolated home directory for a worker. If a worker fails with an authentication error, that is a blocker to report (with the exact error) in `worker-evidence.md` or `orchestrator-result.json`, not something to work around by clearing or redirecting variables or falling back to unscoped credentials.
 Commit creation is authorized only for this selected slice after validation, drift audit, and code review pass. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, or perform destructive actions unless the frozen plan explicitly authorizes that action.
 After creating a commit, run `git rev-parse HEAD` and copy that exact 40-character hash into `orchestrator-result.json` under `commit.hash`. Do not infer, abbreviate, expand from memory, or fabricate a full hash from `git commit` output.
