@@ -27,6 +27,7 @@ def profile_command(
     worker_tools: tuple[str, ...],
     orchestrator_session_id: str | None = None,
     harness_model: str | None = None,
+    harness_effort: str | None = None,
 ) -> str:
     profile = HARNESS_PROFILES.get(harness_name)
     if not profile:
@@ -43,6 +44,12 @@ def profile_command(
         if not model_flag:
             raise McError(f"harness profile {harness_name!r} does not support MC-composed model overrides")
         command.extend([model_flag, harness_model])
+
+    if harness_effort:
+        effort_flag = profile.get("effort_flag")
+        if not effort_flag:
+            raise McError(f"harness profile {harness_name!r} does not support MC-composed effort overrides")
+        command.extend([effort_flag, harness_effort])
 
     if harness_name == "codex":
         if worker_tools:
@@ -70,6 +77,8 @@ def resolve_harness_command(
 ) -> str | None:
     if getattr(args, "harness_model", None) and not getattr(args, "allow_profile_command", False):
         raise McError("--harness-model is only supported with --allow-profile-command")
+    if getattr(args, "harness_effort", None) and not getattr(args, "allow_profile_command", False):
+        raise McError("--harness-effort is only supported with --allow-profile-command")
     if getattr(args, "harness_command", None):
         return args.harness_command
     if getattr(args, "allow_profile_command", False):
@@ -80,5 +89,6 @@ def resolve_harness_command(
             parse_worker_tools(getattr(args, "worker_tools", None)),
             orchestrator_session_id,
             getattr(args, "harness_model", None),
+            getattr(args, "harness_effort", None),
         )
     return None

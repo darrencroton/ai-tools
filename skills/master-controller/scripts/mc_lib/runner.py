@@ -127,8 +127,12 @@ def start_model_supervised_slice(
     harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
     harness_model = getattr(args, "harness_model", None)
+    harness_effort = getattr(args, "harness_effort", None)
     if harness_model:
         state.setdefault("harness", {})["model_requested"] = harness_model
+    if harness_effort:
+        state.setdefault("harness", {})["effort_requested"] = harness_effort
+    if harness_model or harness_effort:
         write_run(run_json, state)
 
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
@@ -137,7 +141,15 @@ def start_model_supervised_slice(
         print(f"warning: {warning}")
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
-        render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, configured_worker_tools),
+        render_orchestrator_prompt(
+            state,
+            plan_slice,
+            slice_artifact_dir,
+            run_json,
+            configured_worker_tools,
+            getattr(args, "worker_model", None),
+            getattr(args, "worker_effort", None),
+        ),
         encoding="utf-8",
     )
 
@@ -301,15 +313,27 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
     harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
     harness_model = getattr(args, "harness_model", None)
+    harness_effort = getattr(args, "harness_effort", None)
     if harness_model:
         state.setdefault("harness", {})["model_requested"] = harness_model
+    if harness_effort:
+        state.setdefault("harness", {})["effort_requested"] = harness_effort
+    if harness_model or harness_effort:
         write_run(run_json, state)
     credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
     for warning in credential_warnings:
         print(f"warning: {warning}")
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
-        render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, configured_worker_tools),
+        render_orchestrator_prompt(
+            state,
+            plan_slice,
+            slice_artifact_dir,
+            run_json,
+            configured_worker_tools,
+            getattr(args, "worker_model", None),
+            getattr(args, "worker_effort", None),
+        ),
         encoding="utf-8",
     )
 

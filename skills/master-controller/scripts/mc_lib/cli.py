@@ -34,7 +34,10 @@ def add_repo_run_args(parser: argparse.ArgumentParser) -> None:
 def add_harness_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--harness-command", help="override harness command for controlled local validation")
     parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
+    parser.add_argument("--harness-effort", help="effort level to compose through the MC harness profile, e.g. medium")
     parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
+    parser.add_argument("--worker-model", help="model name/alias the orchestrator should use for worker launches when supported")
+    parser.add_argument("--worker-effort", help="reasoning/effort level the orchestrator should use for worker launches when supported")
     parser.add_argument(
         "--allow-profile-command",
         action="store_true",

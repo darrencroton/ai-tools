@@ -46,6 +46,7 @@ from .plan import (
 )
 from .profiles import harness_supports_role, parse_worker_tools, profile_command, resolve_harness_command
 from .runtime import (
+    capture_orchestrator_transcript,
     capture_worker_runs_summary,
     environment_preflight,
     extract_operational_hints,
@@ -186,6 +187,8 @@ def status(args: argparse.Namespace) -> int:
     harness_line = str(harness.get("name", "unknown"))
     if harness.get("model_requested"):
         harness_line += f" (requested model: {harness['model_requested']})"
+    if harness.get("effort_requested"):
+        harness_line += f" (requested effort: {harness['effort_requested']})"
     print(f"Harness: {harness_line}")
     print(f"Completed slices: {len(completed_slice_ids(state))}/{state['plan']['slice_count']}")
     supervision = state.get("supervision", {})
@@ -872,9 +875,18 @@ def preflight(args: argparse.Namespace) -> int:
     executable = shlex.split(getattr(args, "harness_command", "") or harness_name)[0]
     if getattr(args, "harness_model", None) and not getattr(args, "allow_profile_command", False):
         check("harness model composition", False, "--harness-model requires --allow-profile-command")
+    if getattr(args, "harness_effort", None) and not getattr(args, "allow_profile_command", False):
+        check("harness effort composition", False, "--harness-effort requires --allow-profile-command")
     if getattr(args, "allow_profile_command", False):
         try:
-            command = profile_command(harness_name, repo, state, parse_worker_tools(args.worker_tools), harness_model=getattr(args, "harness_model", None))
+            command = profile_command(
+                harness_name,
+                repo,
+                state,
+                parse_worker_tools(args.worker_tools),
+                harness_model=getattr(args, "harness_model", None),
+                harness_effort=getattr(args, "harness_effort", None),
+            )
             executable = shlex.split(command)[0]
             check("profile command", True, command)
         except McError as exc:

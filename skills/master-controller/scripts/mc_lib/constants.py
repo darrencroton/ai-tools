@@ -75,9 +75,10 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "roles": ["orchestrator", "senior-worker"],
         "base_command": ["claude", "--permission-mode", "auto"],
         "model_flag": "--model",
+        "effort_flag": "--effort",
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
-            "Optional MC profile model override is composed with --model while preserving --session-id transcript capture.",
+            "Optional MC profile model and effort overrides are composed while preserving --session-id transcript capture.",
             "Do not launch Claude workers from inside a Claude orchestrator.",
             "As orchestrator, launched with --session-id so MC can capture the full JSONL transcript "
             "as orchestrator-transcript.jsonl (pane capture alone loses detail behind Claude Code's "

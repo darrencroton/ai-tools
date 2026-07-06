@@ -3,6 +3,7 @@ import contextlib
 import io
 import importlib.util
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -534,6 +535,25 @@ Continue later.
         self.assertIn("Required worker tool(s) for this run: codex", prompt)
         self.assertIn("authoritative for which worker tool(s) to use", prompt)
 
+    def test_prompt_rendering_states_worker_model_and_effort(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        plan_slice = mc.parse_plan(self.plan)[0]
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+        prompt = mc.render_orchestrator_prompt(
+            state,
+            plan_slice,
+            slice_artifact_dir,
+            run_json,
+            ("codex",),
+            "gpt-5.5",
+            "low",
+        )
+        self.assertIn("Required worker model for this run: gpt-5.5", prompt)
+        self.assertIn("Required worker effort for this run: low", prompt)
+        self.assertIn('model_reasoning_effort="<effort>"', prompt)
+        self.assertIn("does not accept an approval-policy flag", prompt)
+
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
@@ -571,10 +591,23 @@ Continue later.
         with self.assertRaisesRegex(mc.McError, "does not support"):
             mc.profile_command("codex", self.repo, state, (), harness_model="some-model")
 
+    def test_unsupported_profile_effort_override_fails_closed(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        with self.assertRaisesRegex(mc.McError, "does not support"):
+            mc.profile_command("codex", self.repo, state, (), harness_effort="medium")
+
     def test_harness_model_requires_profile_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
         args = argparse.Namespace(harness_command=None, allow_profile_command=False, worker_tools="", harness_model="sonnet")
+        with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
+            mc.resolve_harness_command(args, self.repo, state)
+
+    def test_harness_effort_requires_profile_command(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        args = argparse.Namespace(harness_command=None, allow_profile_command=False, worker_tools="", harness_effort="medium")
         with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
             mc.resolve_harness_command(args, self.repo, state)
 
@@ -904,6 +937,20 @@ Continue later.
                 self.assertTrue(usage["hard_stop"])
                 self.assertEqual(usage["recovery_guidance"], "stop-for-user")
 
+    def test_operational_hints_surface_sub_cap_weekly_usage_warning_without_blocking(self):
+        text = (
+            "You've used 91% of your weekly limit · resets Jul 9 at 8am (Australia/Sydney). "
+            "Until July 7, you can use up to 50% of your plan's weekly usage limit on Fable 5. "
+            "If you hit your limit, you can continue on Fable 5 with usage credits."
+        )
+
+        hints = mc.extract_operational_hints(text, process_running=True, result_exists=False)
+
+        usage = next(hint for hint in hints if hint["kind"] == "usage_limit")
+        self.assertEqual(usage["subtype"], "warning")
+        self.assertFalse(usage["hard_stop"])
+        self.assertEqual(usage["recovery_guidance"], "continue-with-observation")
+
     def test_operational_hints_classify_service_unavailable_and_ambiguous_absolute_reset(self):
         now = datetime(2026, 7, 5, 0, 10, tzinfo=timezone(timedelta(hours=10)))
 
@@ -1183,6 +1230,23 @@ Continue later.
 
         summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["runs"][0]["workers"][0]["label"], "01-codex-check")
+
+    def test_capture_worker_runs_summary_skips_current_symlink(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        worker_root = artifact / "worker-runs"
+        worker_run = worker_root / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(json.dumps({"workers": {}}), encoding="utf-8")
+        (worker_run / "01-codex-check-status.json").write_text(
+            json.dumps({"label": "01-codex-check", "state": "completed", "returncode": 0}),
+            encoding="utf-8",
+        )
+        os.symlink(worker_run, worker_root / "current")
+
+        mc.capture_worker_runs_summary(artifact)
+
+        summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual([Path(entry["run_dir"]).name for entry in summary["runs"]], ["workers-1"])
 
     def test_reconcile_repairs_failed_slice_after_commit_hash_evidence_mismatch(self):
         self.prepare_committed_repo()
@@ -1796,6 +1860,22 @@ Continue later.
         self.prepare_committed_repo()
         state = self.init_run()
         command = mc.profile_command("claude", self.repo, state, (), "fixed-session-id")
+        self.assertIn("--session-id fixed-session-id", command)
+
+    def test_profile_command_claude_composes_model_effort_and_session_id(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        command = mc.profile_command(
+            "claude",
+            self.repo,
+            state,
+            (),
+            "fixed-session-id",
+            harness_model="sonnet",
+            harness_effort="medium",
+        )
+        self.assertIn("--model sonnet", command)
+        self.assertIn("--effort medium", command)
         self.assertIn("--session-id fixed-session-id", command)
 
     def test_capture_orchestrator_transcript_copies_existing_session_file(self):

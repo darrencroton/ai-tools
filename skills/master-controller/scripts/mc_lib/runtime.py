@@ -181,6 +181,27 @@ def extract_operational_hints(
         lowered = text.lower()
         if not lowered:
             continue
+        usage_percent_match = re.search(
+            r"\b(?:you(?:'ve| have)\s+used|used)\s+(\d{1,3})%\b[^.\n]{0,120}\b(?:hourly|daily|weekly|monthly|5[- ]?hour|five[- ]?hour)?\s*(?:usage\s*)?(?:limit|quota|cap)\b",
+            lowered,
+        )
+        informational_usage_warning = bool(usage_percent_match and int(usage_percent_match.group(1)) < 100)
+        conditional_limit_warning = "if you hit your limit" in lowered
+        if informational_usage_warning or conditional_limit_warning:
+            warning_match = usage_percent_match or re.search(r"\bif you hit your limit\b", lowered)
+            if warning_match:
+                hints.append(
+                    _hint(
+                        kind="usage_limit",
+                        subtype="warning",
+                        confidence="high" if usage_percent_match else "medium",
+                        hard_stop=False,
+                        source=source,
+                        evidence_excerpt=_excerpt(text, warning_match.start(), warning_match.end()),
+                        now=observed_at,
+                        recovery_guidance="continue-with-observation",
+                    )
+                )
 
         for subtype, pattern in (
             ("weekly_window", r"\bweekly\b[^.\n]{0,80}\b(?:limit|quota|cap)\b|\b(?:limit|quota|cap)\b[^.\n]{0,80}\bweekly\b"),
@@ -190,6 +211,8 @@ def extract_operational_hints(
                 r"\b(?:account|billing|subscription|plan|credit|credits)\b[^.\n]{0,100}\b(?:limit|quota|cap|exhausted|upgrade|billing)\b",
             ),
         ):
+            if informational_usage_warning or conditional_limit_warning:
+                continue
             match = re.search(pattern, lowered)
             if match:
                 hints.append(
@@ -210,7 +233,12 @@ def extract_operational_hints(
             r"\b(?:limit|quota|cap)\b[^.\n]{0,140}\b(?:reset|try again|in \d+|after \d+)\b",
             lowered,
         )
-        if rolling_match and not any(h["kind"] == "usage_limit" and h["source"] == source and h["hard_stop"] for h in hints):
+        if (
+            rolling_match
+            and not informational_usage_warning
+            and not conditional_limit_warning
+            and not any(h["kind"] == "usage_limit" and h["source"] == source and h["hard_stop"] for h in hints)
+        ):
             reset_at, retry_after, ambiguous = _reset_fields(text, observed_at, max_single_pause_seconds)
             hard_stop = reset_at is None and retry_after is None
             subtype = "unknown_limit" if hard_stop or ambiguous else "rolling_window"
@@ -542,6 +570,8 @@ def render_orchestrator_prompt(
     slice_artifact_dir: Path,
     run_json: Path,
     worker_tools: tuple[str, ...] = (),
+    worker_model: str | None = None,
+    worker_effort: str | None = None,
 ) -> str:
     template = load_prompt_template()
     paths = slice_paths(slice_artifact_dir)
@@ -559,6 +589,8 @@ def render_orchestrator_prompt(
         "claude_config_dir": str(paths["claude_config_dir"]),
         "worker_auth_policy": worker_auth_policy_text(worker_tools),
         "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
+        "worker_model": worker_model or "default",
+        "worker_effort": worker_effort or "default",
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
         "intended_change": plan_slice.sections.get("Intended Change", ""),
@@ -593,7 +625,7 @@ def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
     if not worker_root.exists():
         return
     runs: list[dict[str, Any]] = []
-    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir()):
+    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
         run_entry: dict[str, Any] = {"run_dir": str(run_dir), "workers": []}
         manifest_path = run_dir / "manifest.json"
         if manifest_path.exists():
