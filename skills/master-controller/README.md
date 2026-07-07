@@ -208,7 +208,7 @@ Reset parsing is intentionally narrow. Relative durations such as `try again in 
 
 ## Profiles and Launch Requirements
 
-MC stores one profile per tool instead of one profile per possible role combination. Tool profiles describe stable capabilities and constraints: Codex and Claude can be orchestrators or senior workers, Copilot is a junior worker, and OpenCode is a placeholder until its unattended harness contract is tested.
+MC stores one profile per tool instead of one profile per possible role combination. Tool profiles describe mechanical readiness, not suitability: Codex, Claude, Copilot, and OpenCode are all mechanically validated to run unattended in tmux (accept prompt injection, expose a ready state, fail closed on trust prompts) and are listed as orchestrator-capable in `HARNESS_PROFILES`. Which harness and role actually fits a given task is a per-run operator/model decision based on the configured model's demonstrated capability — see `references/harness-adapter-contract.md` for the validation evidence and residual coverage gaps, and `ai-orchestrator`'s `SKILL.md` for the functional role definitions.
 
 At runtime, MC composes the launch command from the selected harness plus explicit requirements:
 

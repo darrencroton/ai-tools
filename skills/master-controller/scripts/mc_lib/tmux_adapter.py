@@ -182,6 +182,10 @@ class TmuxHarnessAdapter:
             self._wait_codex_ready(session_name)
         elif executable == "claude":
             self._wait_claude_ready(session_name)
+        elif executable == "opencode":
+            self._wait_opencode_ready(session_name)
+        elif executable == "copilot":
+            self._wait_copilot_ready(session_name)
         # Any other executable (a custom --harness-command, a non-TUI harness)
         # has no interactive readiness handshake to perform.
 
@@ -213,6 +217,49 @@ class TmuxHarnessAdapter:
                 raise McError("claude session exited before the prompt could be sent")
             capture = self._pane_text(session_name)
             self._raise_on_trust_prompt("claude", capture)
+            if capture.strip() and capture == previous:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= 1.5:
+                    time.sleep(0.5)
+                    return
+            else:
+                stable_since = None
+            previous = capture
+            time.sleep(0.25)
+
+    def _wait_opencode_ready(self, session_name: str) -> None:
+        # Confirmed by reproduction: a freshly launched `opencode --auto`
+        # session shows a stable "Ask anything..." composer placeholder while
+        # idle. That text disappears once a prompt is in flight, so it is a
+        # reliable one-shot ready marker for the first send.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if not self.session_exists(session_name):
+                raise McError("opencode session exited before the prompt could be sent")
+            capture = self._pane_text(session_name)
+            self._raise_on_trust_prompt("opencode", capture)
+            if "Ask anything" in capture:
+                time.sleep(0.5)
+                return
+            time.sleep(0.25)
+        raise McError("opencode TUI did not become ready for prompt injection")
+
+    def _wait_copilot_ready(self, session_name: str) -> None:
+        # Copilot's footer text changes between states ("autopilot · /
+        # commands" before any prompt, "/ commands · ? help" after), so there
+        # is no single stable banner string to key on the way codex has.
+        # Readiness is inferred the same way as Claude: the TUI finishing its
+        # draw (non-empty pane unchanged across a short window). The
+        # directory-trust dialog is caught explicitly and fails closed.
+        deadline = time.monotonic() + 20.0
+        previous = ""
+        stable_since: float | None = None
+        while time.monotonic() < deadline:
+            if not self.session_exists(session_name):
+                raise McError("copilot session exited before the prompt could be sent")
+            capture = self._pane_text(session_name)
+            self._raise_on_trust_prompt("copilot", capture)
             if capture.strip() and capture == previous:
                 if stable_since is None:
                     stable_since = time.monotonic()

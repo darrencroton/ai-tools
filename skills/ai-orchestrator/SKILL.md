@@ -38,11 +38,14 @@ Before replying, every checklist item must be completed, deferred, or explicitly
 
 ## Available Models
 
-| Model | Roles | Best used for | Avoid for | Reference |
+Role fit is a functional judgment, not a fixed property baked into a CLI's name. Decide per task using the role definitions above plus each reference file's own notes on what its currently configured model has actually demonstrated — the same CLI can be a strong orchestrator with one configured model and unsuitable for anything past junior-worker with another. Do not treat this table as a hardcoded capability gate; treat it as a starting default to override when the reference file's notes, or direct evidence from this session, say otherwise.
+
+| Model | Default fit | Best used for | Avoid for | Reference |
 |---|---|---|---|---|
 | **Claude Code** | Orchestrator, Senior worker | Complex edits, long-running coding, plan review, deep debugging | Low-value tactical chores when a junior worker is available | [references/claude.md](references/claude.md) |
 | **Codex CLI** | Orchestrator, Senior worker | Complex edits, refactors, plan review, deep debugging | Low-value tactical chores when a junior worker is available | [references/codex.md](references/codex.md) |
-| **GitHub Copilot CLI** | Junior worker | Surgical edits, approved git/GitHub operations, low-stakes web research, codebase mapping, non-critical summarising | Multi-file refactors, correctness-critical judgement, owning complex plans | [references/copilot.md](references/copilot.md) |
+| **GitHub Copilot CLI** | Junior worker by default; senior/orchestrator when a strong configured model earns it | Surgical edits, approved git/GitHub operations, low-stakes web research, codebase mapping, non-critical summarising | Multi-file refactors, correctness-critical judgement, or owning complex plans unless the configured model has demonstrated that reliability | [references/copilot.md](references/copilot.md) |
+| **OpenCode CLI** | Depends entirely on the configured model (often local/self-hosted) | Local/offline iteration; complex work when a capable model is configured; tactical work when only a small model is configured | Correctness-critical judgement without a demonstrably capable configured model | [references/opencode.md](references/opencode.md) |
 
 ## Skill and Tool Coordination
 

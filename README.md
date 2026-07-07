@@ -119,8 +119,8 @@ Mode C1 launcher:
 Plan file: <path>
 Target repo: <path>
 Scope: <one slice, next slice, or all remaining slices>
-Harness: codex unless I specify otherwise.
-Worker tools: <omit unless the plan requires external workers, e.g. copilot>
+Harness: codex unless I specify otherwise. (claude, copilot, and opencode are also validated MC orchestrator harnesses — name one explicitly to use it.)
+Worker tools: <omit unless the plan requires external workers, e.g. copilot or opencode>
 
 Use master-controller as the supervising skill for this run in model-supervised Mode C.
 
@@ -147,8 +147,8 @@ Mode C2 deterministic batch launcher:
 Plan file: <path>
 Target repo: <path>
 Scope: <one slice, next slice, or all remaining slices>
-Harness: codex unless I specify otherwise.
-Worker tools: <omit unless the plan requires external workers, e.g. copilot>
+Harness: codex unless I specify otherwise. (claude, copilot, and opencode are also validated MC orchestrator harnesses — name one explicitly to use it.)
+Worker tools: <omit unless the plan requires external workers, e.g. copilot or opencode>
 
 Use master-controller as the supervising skill for this run.
 

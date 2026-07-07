@@ -634,15 +634,75 @@ Continue later.
         with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
             mc.resolve_harness_command(args, self.repo, state)
 
-    def test_copilot_profile_cannot_be_orchestrator(self):
+    def test_copilot_profile_composes_orchestrator_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
-        with self.assertRaisesRegex(mc.McError, "not approved for the orchestrator role"):
-            mc.profile_command("copilot", self.repo, state, ())
+        command = mc.profile_command("copilot", self.repo, state, (), harness_model="claude-sonnet-4.6")
+        parts = shlex.split(command)
+        self.assertEqual(
+            parts,
+            ["copilot", "--allow-all-tools", "--autopilot", "--model", "claude-sonnet-4.6"],
+        )
+
+    def test_opencode_profile_composes_orchestrator_command(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        command = mc.profile_command(
+            "opencode", self.repo, state, (), harness_model="macstudio/qwen/qwen3.6-27b-q8", harness_effort="high"
+        )
+        parts = shlex.split(command)
+        self.assertEqual(
+            parts,
+            ["opencode", "--auto", "-m", "macstudio/qwen/qwen3.6-27b-q8", "--variant", "high"],
+        )
 
     def test_codex_unattended_default_uses_no_alt_screen(self):
         adapter = mc.TmuxHarnessAdapter("codex", None, allow_unattended_default=True)
         self.assertEqual(adapter.command, "codex --no-alt-screen -s workspace-write -a never")
+
+    def test_opencode_unattended_default(self):
+        adapter = mc.TmuxHarnessAdapter("opencode", None, allow_unattended_default=True)
+        self.assertEqual(adapter.command, "opencode --auto")
+
+    def test_copilot_unattended_default(self):
+        adapter = mc.TmuxHarnessAdapter("copilot", None, allow_unattended_default=True)
+        self.assertEqual(adapter.command, "copilot --allow-all-tools --autopilot")
+
+    def test_opencode_readiness_wait_blocks_on_trust_prompt(self):
+        adapter = mc.TmuxHarnessAdapter("opencode", "opencode")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, "Do you trust the files in this directory?", ""),
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep"):
+            with self.assertRaisesRegex(mc.McError, "trust prompt"):
+                adapter.wait_until_prompt_ready("session")
+
+    def test_opencode_readiness_wait_accepts_ready_composer(self):
+        adapter = mc.TmuxHarnessAdapter("opencode", "opencode")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, 'Ask anything... "Fix broken tests"', ""),
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep") as sleep:
+            adapter.wait_until_prompt_ready("session")
+        sleep.assert_called()
+
+    def test_copilot_readiness_wait_blocks_on_trust_prompt(self):
+        adapter = mc.TmuxHarnessAdapter("copilot", "copilot")
+        calls = [
+            mc.CommandResult(0, "", ""),
+            mc.CommandResult(0, "Do you trust the files in this folder?", ""),
+        ]
+        with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls), mock.patch.object(mc_tmux_adapter.time, "sleep"):
+            with self.assertRaisesRegex(mc.McError, "trust prompt"):
+                adapter.wait_until_prompt_ready("session")
+
+    # Copilot's positive stable-pane readiness path has no unit test here,
+    # matching claude's existing test coverage (mocking time.sleep as a no-op
+    # makes real time.monotonic() spin through the stability window too fast
+    # to exercise reliably). Both were verified manually against a live tmux
+    # session; see the notes on the copilot HARNESS_PROFILES entry.
 
     def test_codex_readiness_wait_blocks_on_trust_prompt(self):
         adapter = mc.TmuxHarnessAdapter("codex", "codex")

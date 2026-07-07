@@ -9,7 +9,7 @@ This repo defines the `ai-orchestrator` skill. It teaches an AI coding agent how
 - `README.md`: human-facing overview and short maintenance notes
 - `SKILL.md`: source of truth for generic orchestration workflow, role selection, monitoring cadence, and helper usage
 - `references/templates.md`: prompt shapes only
-- `references/claude.md`, `references/codex.md`, `references/copilot.md`: model-specific CLI references; keep the same structure across senior-worker model files and only change the model-specific details
+- `references/claude.md`, `references/codex.md`, `references/copilot.md`, `references/opencode.md`: model-specific CLI references; keep the same structure across senior-worker model files and only change the model-specific details
 - `scripts/worker_jobs.py`: tracked worker launcher plus `status`, `activity`, `cancel`, and `extract`
 - `ai-reminder`: separate tmux/session reminder helper for long-running Claude/Codex sessions
 

@@ -2,9 +2,11 @@
 
 ## Roles It Can Fill
 
-- **Orchestrator**: No
-- **Senior worker**: No
-- **Junior worker**: Yes
+- **Orchestrator**: Only if the configured model has demonstrated it can own planning, verification, and synthesis reliably; default to no
+- **Senior worker**: Only if the configured model has demonstrated multi-file-edit reliability; default to no
+- **Junior worker**: Yes — the reliable default for this CLI regardless of configured model
+
+Role fit depends on which model Copilot is actually configured with (see Config Discovery), not on the CLI itself. Default to junior-worker scope unless you have direct evidence in this session that a stronger role is warranted.
 
 ## Best Used For
 
@@ -68,7 +70,7 @@ Use `worker_jobs.py extract` when you want the final answer or section filtering
 
 ## Notes
 
-- Keep Copilot in junior-worker scope only. If the task expands beyond that scope, stop and reassign it.
+- Default to junior-worker scope. Only use Copilot as a senior worker or orchestrator when the configured model has demonstrated that reliability in this session; otherwise stop and reassign to junior-worker scope or a different model.
 - For junior-worker tasks, wait for the role-appropriate window, then run `worker_jobs.py activity`. A recent `last_activity_at` or `healthy=yes` means keep waiting.
 - Model choice materially affects captured-output reliability. In this environment, the latest available `claude-sonnet-X` followed strict section contracts more reliably than the tested GPT alternatives.
 - `--silent` suppresses CLI wrapper noise, not model-authored preambles or progress chatter.

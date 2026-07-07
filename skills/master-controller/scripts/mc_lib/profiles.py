@@ -75,7 +75,7 @@ def profile_command(
             command.extend(profile["worker_network_flag"])
         if state.get("policy", {}).get("commit_required", True):
             command.extend([profile["commit_git_access_flag"], str(git_access_path(repo))])
-    elif worker_tools and harness_name not in {"claude"}:
+    elif worker_tools and harness_name not in {"claude", "copilot", "opencode"}:
         raise McError(f"harness profile {harness_name!r} has no tested worker-enabled launch path")
     if harness_name == "claude" and orchestrator_session_id:
         # Pins the session transcript to a deterministic path under

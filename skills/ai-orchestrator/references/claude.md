@@ -6,6 +6,8 @@
 - **Senior worker**: Yes
 - **Junior worker**: Not preferred
 
+These are defaults for a normally-configured Claude Code session, not a fixed guarantee — role fit still depends on the configured model (see Config Discovery). Downgrade the default if the configured model or session evidence doesn't support it.
+
 ## Best Used For
 
 - Complex edits and refactors

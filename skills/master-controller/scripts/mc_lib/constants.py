@@ -55,6 +55,8 @@ DEFAULT_SUPERVISION: dict[str, Any] = {
 KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
     "codex": "codex --no-alt-screen -s workspace-write -a never",
     "claude": "claude --permission-mode auto",
+    "opencode": "opencode --auto",
+    "copilot": "copilot --allow-all-tools --autopilot",
 }
 
 HARNESS_PROFILES: dict[str, dict[str, Any]] = {
@@ -99,25 +101,49 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         ],
     },
     "copilot": {
-        "roles": ["junior-worker"],
-        "base_command": ["copilot"],
+        "roles": ["orchestrator", "senior-worker", "junior-worker"],
+        "base_command": ["copilot", "--allow-all-tools", "--autopilot"],
         "model_flag": "--model",
         "effort_flag": "--effort",
         "worker_command_notes": [
             "For Copilot workers, use `--model <model>` for model and `--effort <effort>` for effort.",
         ],
         "notes": [
-            "Copilot is a worker profile only; it is not an MC orchestrator harness.",
-            "Copilot CLI supports model and effort flags for worker commands, but MC has no tested Copilot orchestrator readiness contract yet.",
+            "Mechanically validated as an MC orchestrator harness: bare interactive TUI accepts tmux paste-buffer "
+            "plus double-Enter prompt injection identically to codex/claude, and its directory-trust dialog text "
+            "('Do you trust the files in this folder?') matches an existing generic TRUST_PROMPT_MARKERS entry, so "
+            "MC already fails closed on it.",
+            "Which role (orchestrator, senior worker, junior worker) fits a given task is a per-run operator/model "
+            "decision based on the configured Copilot model's demonstrated capability, not a fixed property of "
+            "this profile — see harness-adapter-contract.md and ai-orchestrator's role definitions.",
             "Use a per-slice COPILOT_HOME for sandboxed session state.",
+            "Coverage gap: only the directory-trust prompt has been directly observed; other Copilot prompt classes "
+            "(credential, permission-denial, external side effect) rely on the same generic keyword markers used "
+            "for every harness and have not been individually triggered and confirmed.",
         ],
     },
     "opencode": {
-        "roles": ["pending"],
-        "base_command": ["opencode"],
+        "roles": ["orchestrator", "senior-worker", "junior-worker"],
+        "base_command": ["opencode", "--auto"],
+        "model_flag": "-m",
+        "effort_flag": "--variant",
+        "worker_command_notes": [
+            "For OpenCode workers, use `-m <provider/model>` for model (form from ~/.config/opencode/opencode.json, "
+            "e.g. macstudio/qwen/qwen3.6-27b-q8) and `--variant <effort>` for effort when the underlying model "
+            "supports reasoning-effort control.",
+        ],
         "notes": [
-            "Profile placeholder for future validation.",
-            "Do not use as an MC harness until an unattended prompt, permission, and capture contract has been tested.",
+            "Mechanically validated as an MC orchestrator harness: bare interactive TUI shows a stable 'Ask "
+            "anything...' idle placeholder as a ready marker and accepts the same tmux paste-buffer plus "
+            "double-Enter prompt injection as codex/claude/copilot.",
+            "Primarily backed by local/self-hosted models (see ~/.config/opencode/opencode.json, served via "
+            "~/.llm/llama-server/); may also be configured with subscription models. Role fit depends entirely on "
+            "the configured model's demonstrated capability, not on this profile — weak local models should stay "
+            "in junior-worker or narrowly-scoped senior-worker use even though the mechanics support all roles.",
+            "Coverage gap: no opencode-specific hard-stop-prompt text (credential, permission-denial, external "
+            "side effect) has been directly observed; detection relies on the same generic keyword markers used "
+            "for every harness. The whitelisted-directory permission prompt implied by opencode.json's "
+            "external_directory 'ask' rule has not been triggered and confirmed.",
         ],
     },
 }

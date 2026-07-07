@@ -41,7 +41,7 @@ When the user gives MC a complete implementation plan and asks to implement it, 
 
 Current deterministic batch path:
 
-1. Use `codex` as the default orchestrator harness when no harness is specified.
+1. Use `codex` as the default orchestrator harness when no harness is specified. `claude`, `copilot`, and `opencode` are also validated orchestrator harnesses (see `references/harness-adapter-contract.md`) — use one of them when the user names it explicitly, or when the task and configured model make it the better functional fit per `ai-orchestrator`'s role definitions.
 2. Initialize an MC run if `.ai-mc/current` is missing or is for a different plan; otherwise reuse the current run after checking status. When the user has authorized a specific branch and it is not already current, pass `--branch <name>`; add `--create-branch` only when branch creation is explicitly authorized.
 3. Run `preflight` before the first slice. Include `--worker-tools <tool[,tool]>` when the plan or user requires workers, and include `--allow-profile-command` for normal local execution.
 4. Run `run-next --dry-run` and confirm the selected slice is eligible.
