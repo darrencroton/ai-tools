@@ -28,8 +28,8 @@ If the contract is missing or too vague, stop after drafting a candidate contrac
 2. **Check starting state** - inspect `git status` and relevant files. Do not overwrite unrelated user changes.
 3. **Implement only the slice** - keep edits inside the authorized files/functions. Do not perform opportunistic cleanup.
 4. **Validate** - run the targeted checks from the contract. Add or update tests when the contract requires it.
-5. **Prepare drift audit input** - collect the frozen contract, changed files, diff summary, and validation results for the user's next explicit `drift-audit` call.
-6. **Report receipt** - finish with the implementation receipt below. Do not run `drift-audit` from this skill unless the user explicitly calls both skills in the same request.
+5. **Prepare drift audit input** - collect the frozen contract, changed files, diff summary, and validation results for the user's next explicit call to the drift-audit skill.
+6. **Report receipt** - finish with the implementation receipt below. Do not run the drift-audit skill as part of this skill unless the user explicitly calls both skills in the same request.
 
 ## Delegation
 
@@ -38,10 +38,10 @@ Keep small implementation slices local when delegation would add more prompt/con
 Use `ai-orchestrator` only when it is also explicitly requested or already active for the task. When using it:
 
 - delegate codebase mapping, long-running tests, or implementation of a well-bounded slice when that improves quality or saves meaningful time
-- delegate `drift-audit` only when the user explicitly called `drift-audit` or explicitly asked to combine implementation and drift audit
+- delegate the drift-audit skill only when the user explicitly called the drift-audit skill or explicitly asked to combine implementation and drift audit
 - never let a worker expand the slice, approve drift, or own the final verdict
 - give edit workers the frozen contract and exact authorized surface
-- give `drift-audit` workers only the frozen contract, diff, and relevant tests
+- give workers applying the drift-audit skill only the frozen contract, diff, and relevant tests
 
 ## Implementation Receipt
 
@@ -71,7 +71,7 @@ End with this shape:
 - Relevant tests:
 
 ### Recommended Next Step
-- Explicitly call `drift-audit` before `code-review`.
+- Explicitly call the drift-audit skill before the code-review skill.
 
 ### Rollback Path
 - ...

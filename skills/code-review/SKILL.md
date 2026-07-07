@@ -46,7 +46,7 @@ Every review must do all of the following:
 
 ### 2. Confirm authorization status
 - If a `drift-audit` result is supplied, summarize its verdict and proceed to quality review.
-- If a frozen contract exists but no `drift-audit` result is supplied, state that the user should explicitly call `drift-audit` first. Continue only if the user explicitly asks for combined drift and quality review.
+- If a frozen contract exists but no `drift-audit` result is supplied, state that the user should explicitly call the drift-audit skill first. Continue only if the user explicitly asks for combined drift and quality review.
 - If a supplied `drift-audit` result is incomplete or contradicted by the diff, report that as an open question instead of silently redoing the audit.
 
 ### 3. Establish expected behaviour

@@ -64,7 +64,7 @@ Read the full plan file first AND read HANDOFF.md — the handoff is part of the
 
 Work on the current feature branch for this plan; if none exists, create one and tell me the name.
 
-Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review, and long-running tests.
+Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review skill pass, and long-running tests.
 
 For each selected slice or batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals) from the plan.

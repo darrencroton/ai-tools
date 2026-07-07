@@ -62,7 +62,7 @@ Read the full plan file first. If a selected slice or batch receipt is incomplet
 
 Work on the current feature branch for this plan; if none exists, create one and tell me the name.
 
-Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review, and long-running tests.
+Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review skill pass, and long-running tests.
 
 For each selected slice or batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals) from the plan.
@@ -86,7 +86,7 @@ Scope: all remaining slices, in plan order.
 
 Read the full plan file first. If the plan is incomplete or its state is unclear, stop and report instead of improvising.
 
-Act as the orchestrator per the ai-orchestrator skill. You own the full run — implement, gate, recover, and make the accept/reject call. Delegate to other models for independence and context economy per that skill: at minimum the hostile drift-audit skill and an independent code-review per slice, plus long-running tests.
+Act as the orchestrator per the ai-orchestrator skill. You own the full run — implement, gate, recover, and make the accept/reject call. Delegate to other models for independence and context economy per that skill: at minimum the hostile drift-audit skill and an independent code-review skill pass per slice, plus long-running tests.
 
 Setup: create a new branch for this run, switch to it, and report the name.
 
@@ -97,7 +97,7 @@ For each slice or approved batch, in plan order:
 4. apply the drift-audit skill (delegate a hostile audit). Record the authorization gate result.
 5. If the gate fails, fix the drift inside the contract and re-audit. If it can't be fixed inside the contract, STOP and report.
 6. On a passing gate, apply the code-review skill (delegate for independence). Fix findings, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
-7. When the slice passes validation, the drift-audit skill and the code-review skill, use the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
+7. When the slice passes validation, the drift-audit gate, and the code-review gate, use the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
 
 Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, use the handoff skill to record current state and the next slice or batch to resume from.
 
