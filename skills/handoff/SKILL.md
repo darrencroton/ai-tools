@@ -64,7 +64,7 @@ Read the full plan file first AND read HANDOFF.md — the handoff is part of the
 
 Work on the current feature branch for this plan; if none exists, create one and tell me the name.
 
-Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily hostile drift-audit, independent code-review, and long-running tests.
+Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review, and long-running tests.
 
 For each selected slice or batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals) from the plan.
@@ -75,7 +75,7 @@ For each selected slice or batch, in plan order:
 6. Surface drift and review findings to me, fix them, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
 7. Ask me before committing. On my approval, commit the selected slice or batch with the commit skill.
 
-After the selected slice(s) or batch are committed, use handoff to record state and the next slice or batch to resume from. Do not continue past the selected scope.
+After the selected slice(s) or batch are committed, use the handoff skill to record state and the next slice or batch to resume from. Do not continue past the selected scope.
 
 Confirm before starting: plan file read, HANDOFF.md read, selected slice(s) or batch, branch, and the first slice.
 ```
