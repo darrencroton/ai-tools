@@ -69,9 +69,9 @@ Use ai-orchestrator as the controlling skill. Keep the implementation local; del
 For each selected slice or batch, in plan order:
 1. Restate the frozen contract (authorized surface + non-goals) from the plan.
 2. If any included slice's Risk Flags mark approval-needed, stop and get my approval before coding.
-3. Apply scoped-implementation against the selected contract.
-4. Apply drift-audit. Report the authorization gate result before any quality review.
-5. If the gate passes, apply code-review. If it fails, fix the drift and re-audit.
+3. apply the scoped-implementation skill against the selected contract.
+4. apply the drift-audit skill. Report the authorization gate result before any quality review.
+5. If the gate passes, apply the code-review skill. If it fails, fix the drift and re-audit.
 6. Surface drift and review findings to me, fix them, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
 7. Ask me before committing. On my approval, commit the selected slice or batch with the commit skill.
 

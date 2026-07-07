@@ -56,14 +56,14 @@ Frozen contract:
 {rollback_path}
 
 Required workflow:
-1. Apply `scoped-implementation` against this frozen contract.
+1. apply the scoped-implementation skill against this frozen contract.
 2. Run the validation commands required by the contract.
-3. Apply `drift-audit` and record the authorization verdict before quality review.
+3. apply the drift-audit skill and record the authorization verdict before quality review.
 4. If drift audit fails, fix only authorized drift and re-audit. If it cannot be fixed inside the contract, stop.
-5. If drift audit passes, apply `code-review`.
+5. If drift audit passes, apply the code-review skill.
 6. Fix material review findings inside the contract, then re-run the relevant validation and gate.
 7. Ask for no remote push, PR, release, deploy, dependency/license change, secret entry, or destructive action unless explicitly authorized in the plan.
-8. Use `commit` only when the slice passes validation, drift audit, and code review.
+8. use the commit skill only when the slice passes validation, drift audit, and code review.
 9. After commit, run `git rev-parse HEAD` and use that exact full hash in `orchestrator-result.json`.
 
 Worker helper sequence:
