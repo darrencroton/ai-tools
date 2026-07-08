@@ -149,6 +149,7 @@ def current_slice_state(
     started_at: str,
     before_head: str | None,
     orchestrator_session_id: str | None = None,
+    worker_tools: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     state = {
         "slice_id": plan_slice.slice_id,
@@ -159,6 +160,11 @@ def current_slice_state(
         "started_at": started_at,
         "before_head": before_head,
         "pause": None,
+        # Persisted so a later, separate invocation (finalize-slice,
+        # stop-with-evidence) can recover the worker-tool requirement for
+        # this slice attempt without depending on that invocation's own
+        # --worker-tools flag, which may not be re-supplied.
+        "worker_tools": list(worker_tools),
     }
     if orchestrator_session_id:
         state["orchestrator_session_id"] = orchestrator_session_id
@@ -172,6 +178,7 @@ def slice_entry_from_gate(
     started_at: str,
     gate: GateDecision,
     before_head: str | None = None,
+    worker_tools: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     result = gate.result or {}
     return {
@@ -193,6 +200,9 @@ def slice_entry_from_gate(
         "next_action": result.get("next_action", ""),
         "blockers": result.get("blockers", []),
         "gate_reason": gate.reason,
+        # Preserved (not just read) so reconcile can recover the worker-tool
+        # requirement for this attempt without a fresh --worker-tools flag.
+        "worker_tools": list(worker_tools),
     }
 
 

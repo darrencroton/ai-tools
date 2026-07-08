@@ -802,8 +802,15 @@ def reconcile(args: argparse.Namespace) -> int:
     after_head = git_head(repo)
     after_status = git_status_text(repo)
     capture_worker_runs_summary(artifact_dir)
-    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status)
-    reconciled_entry = slice_entry_from_gate(repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate, before_head)
+    # Recovered from the entry this reconcile call is replacing, not a fresh
+    # --worker-tools flag: reconcile is a separate invocation and the original
+    # slice attempt's worker requirement must not be lost on reconciliation.
+    entry_worker_tools = entry.get("worker_tools")
+    worker_tools = tuple(entry_worker_tools) if isinstance(entry_worker_tools, list) else ()
+    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, worker_tools)
+    reconciled_entry = slice_entry_from_gate(
+        repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate, before_head, worker_tools
+    )
     state["slices"][entry_index] = reconciled_entry
     state["current_slice"] = None
     if gate.status == "pass":

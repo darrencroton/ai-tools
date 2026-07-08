@@ -1300,6 +1300,136 @@ Continue later.
         self.assertEqual(decision.status, "fail")
         self.assertIn("did not advance HEAD", decision.reason)
 
+    def test_gate_blocks_pass_when_required_worker_never_launched(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state = self.init_run()
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("have no worker-evidence.md", decision.reason)
+
+    def test_gate_blocks_pass_when_worker_evidence_is_narration_without_a_launch(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text(
+            "# Worker Evidence\n- Result summary: worker was not launched; orchestrator did the check itself.\n",
+            encoding="utf-8",
+        )
+        # A worker-runs directory was init'd but no worker was ever started in it,
+        # exactly reproducing the observed OpenCode/OpenCode Test 5 failure mode.
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(json.dumps({"workers": {}}), encoding="utf-8")
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("no worker was started in it", decision.reason)
+
+    def test_gate_accepts_pass_when_required_worker_has_real_run_evidence(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text(
+            "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: confirmed unchanged.\n",
+            encoding="utf-8",
+        )
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {"01-opencode-readonly-check": {"tool": "opencode", "command": ["opencode", "run"]}}}),
+            encoding="utf-8",
+        )
+        (worker_run / "01-opencode-readonly-check-status.json").write_text(
+            json.dumps({"label": "01-opencode-readonly-check", "state": "completed", "returncode": 0}),
+            encoding="utf-8",
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "pass")
+
+    def test_gate_blocks_pass_when_worker_is_mislabeled_but_actually_a_different_executable(self):
+        # Reproduces a live OpenCode/OpenCode test run: a worker labeled
+        # "01-opencode-drift-check" whose manifest recorded "tool": "bash"
+        # because the orchestrator ran a shell one-liner through worker_jobs.py
+        # instead of actually invoking `opencode`.
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text(
+            "# Worker Evidence\n- Label: 01-opencode-drift-check\n- Result summary: drift check passed.\n",
+            encoding="utf-8",
+        )
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {"01-opencode-drift-check": {"tool": "bash", "command": ["bash", "-c", "grep foo"]}}}),
+            encoding="utf-8",
+        )
+        (worker_run / "01-opencode-drift-check-status.json").write_text(
+            json.dumps({"label": "01-opencode-drift-check", "state": "completed", "returncode": 0}),
+            encoding="utf-8",
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "fail")
+        self.assertIn("were never actually invoked", decision.reason)
+
+    def test_gate_ignores_worker_evidence_when_no_worker_tool_is_required(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "pass")
+
     def test_capture_worker_runs_summary_records_status_files(self):
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         worker_run = artifact / "worker-runs" / "workers-1"
@@ -2265,7 +2395,7 @@ Continue later.
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         captured = {}
 
-        def fake_gate(repo, run_state, plan_slice, art, before, after, status):
+        def fake_gate(repo, run_state, plan_slice, art, before, after, status, worker_tools=()):
             captured["before"] = before
             return mc.GateDecision("fail", "still bad", {"changed_files": []}, ())
 

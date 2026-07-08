@@ -98,6 +98,69 @@ def object_field(result: dict[str, Any], field: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, ...]) -> str | None:
+    """Return a gate-failure reason if a required worker tool has no mechanical launch evidence.
+
+    An orchestrator can write a `worker-evidence.md` that narrates why it chose
+    not to launch a worker (or self-declares its own substitute as sufficient),
+    but that prose is not proof a worker actually ran. `worker-runs-summary.json`
+    is populated only from real `worker_jobs.py` run-directory artifacts
+    (`manifest.json` / `*-status.json`), so it cannot be satisfied by narration
+    alone. Require: a non-empty `worker-evidence.md` (the plan-mandated record),
+    at least one real worker entry in the run summary, and at least one of
+    those entries whose manifest `tool` (worker_jobs.py's own
+    `Path(command[0]).name` on the executed subprocess, not orchestrator-
+    reported) matches a required tool name. The last check specifically closes
+    a failure mode observed in testing: a worker labeled e.g.
+    `01-opencode-drift-check` whose manifest recorded `"tool": "bash"` — the
+    orchestrator ran a shell one-liner through the worker helper and named it
+    after the required tool rather than actually invoking that tool.
+    """
+    if not worker_tools:
+        return None
+    tools_label = ", ".join(worker_tools)
+    required = {tool.lower() for tool in worker_tools}
+    evidence_path = slice_artifact_dir / "worker-evidence.md"
+    if not evidence_path.is_file() or evidence_path.stat().st_size == 0:
+        return f"required worker tool(s) ({tools_label}) have no worker-evidence.md for this slice"
+    summary_path = slice_artifact_dir / "worker-runs-summary.json"
+    if not summary_path.is_file():
+        return (
+            f"required worker tool(s) ({tools_label}) were never launched: worker-runs-summary.json is missing "
+            "(no worker_jobs.py run directory was created)"
+        )
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "worker-runs-summary.json is not valid JSON"
+    runs = summary.get("runs") if isinstance(summary, dict) else []
+    if not isinstance(runs, list):
+        runs = []
+    any_worker = False
+    matched_tool = False
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("workers"):
+            any_worker = True
+        manifest_workers = object_field(run.get("manifest") or {}, "workers") if isinstance(run.get("manifest"), dict) else {}
+        for entry in manifest_workers.values() if isinstance(manifest_workers, dict) else ():
+            if isinstance(entry, dict) and str(entry.get("tool", "")).lower() in required:
+                matched_tool = True
+    if not any_worker:
+        return (
+            f"required worker tool(s) ({tools_label}) were never launched: a worker_jobs.py run directory was "
+            "created but no worker was started in it (worker-runs-summary.json has no worker entries)"
+        )
+    if not matched_tool:
+        return (
+            f"required worker tool(s) ({tools_label}) were never actually invoked: worker_jobs.py recorded worker "
+            "run(s), but none used an executable matching the required tool name(s) — check for a worker labeled "
+            "after the required tool while actually running a different command"
+        )
+    return None
+
+
 def _validation_status(validation: Any) -> str | None:
     """Return a gate-failure reason for the validation block, or None if it passes."""
     if not isinstance(validation, list) or not validation:
@@ -156,6 +219,7 @@ def verify_gate(
     before_head: str | None,
     after_head: str | None,
     after_status: str,
+    worker_tools: tuple[str, ...] = (),
 ) -> GateDecision:
     result_path = slice_artifact_dir / "orchestrator-result.json"
     try:
@@ -203,6 +267,10 @@ def verify_gate(
         return GateDecision("fail", f"code review verdict is not PASS: {review_verdict or 'missing'}", result, changed_evidence)
     if not artifact_exists(repo, slice_artifact_dir, result, "code_review", "code-review.md"):
         return GateDecision("fail", "code review artifact is missing", result, changed_evidence)
+
+    worker_failure = worker_evidence_failure(slice_artifact_dir, worker_tools)
+    if worker_failure:
+        return GateDecision("fail", worker_failure, result, changed_evidence)
 
     commit = result.get("commit") if isinstance(result.get("commit"), dict) else {}
     if state.get("policy", {}).get("commit_required", True):

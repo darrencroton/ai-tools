@@ -263,6 +263,10 @@ def finalize_model_supervised_slice(
     )
     before_head = str(current.get("before_head") or "") or previous_completed_head(state, plan_slice.slice_id)
     started_at = str(current.get("started_at") or utc_now())
+    # Recovered from persisted current_slice state rather than args.worker_tools:
+    # this is a separate invocation and may not re-supply --worker-tools.
+    current_worker_tools = current.get("worker_tools")
+    worker_tools = tuple(current_worker_tools) if isinstance(current_worker_tools, list) else ()
 
     adapter.capture(session_name, slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt")
     attempt_capture = slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt"
@@ -271,10 +275,10 @@ def finalize_model_supervised_slice(
     capture_orchestrator_transcript(harness_name, repo, str(orchestrator_session_id) if orchestrator_session_id else None, slice_artifact_dir)
     capture_worker_runs_summary(slice_artifact_dir)
     after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
-    gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
+    gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status, worker_tools)
     adapter.force_stop(session_name)
 
-    entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, gate, before_head)
+    entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, gate, before_head, worker_tools)
     state["slices"].append(entry)
     state["current_slice"] = None
     if gate.status == "pass":
@@ -378,6 +382,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             started_at,
             before_head,
             orchestrator_session_id,
+            configured_worker_tools,
         )
         state["stop_reason"] = None
         write_run(run_json, state)
@@ -436,7 +441,9 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 last_gate = GateDecision("blocked", "timeout waiting for orchestrator-result.json")
             else:
                 after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
-                last_gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status)
+                last_gate = verify_gate(
+                    repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status, configured_worker_tools
+                )
         except KeyboardInterrupt:
             _capture_failure_evidence(
                 adapter,
@@ -471,7 +478,9 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
 
         if last_gate.status == "repairable" and attempt < max_attempts:
             continue
-        entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, last_gate, slice_start_head)
+        entry = slice_entry_from_gate(
+            repo, plan_slice, slice_artifact_dir, started_at, last_gate, slice_start_head, configured_worker_tools
+        )
         state["slices"].append(entry)
         state["current_slice"] = None
         if last_gate.status == "pass":

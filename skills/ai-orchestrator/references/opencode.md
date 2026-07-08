@@ -38,7 +38,7 @@ Launch all OpenCode worker runs via [../scripts/worker_jobs.py](../scripts/worke
 opencode run "PROMPT" [-m <provider/model>] [--variant <effort>] --agent build --auto --dir <dir>
 
 # Read-only review / plan review worker command
-opencode run "PROMPT" [-m <provider/model>] [--variant <effort>] --agent plan --dir <dir>
+opencode run "PROMPT" [-m <provider/model>] [--variant <effort>] --agent plan --auto --dir <dir>
 
 # Resume most recent session
 opencode run "PROMPT" --continue --dir <dir>
@@ -88,7 +88,7 @@ Use `worker_jobs.py extract` when you want the clean final answer — it reads s
 ## Permission Guidance
 
 - **Edit tasks**: `--agent build --auto`
-- **Read-only review**: `--agent plan` (omit `--auto` unless the read-only agent still needs tool execution approval bypassed for non-interactive use)
+- **Read-only review**: `--agent plan --auto`. Confirmed by direct testing: without `--auto`, a headless `opencode run --agent plan` call hangs indefinitely waiting for a tool-execution approval that no one is present to give — there is no TTY to approve it. `--agent plan` already keeps the agent read-only regardless of `--auto`; `--auto` only bypasses the approval prompt, it does not grant write access. Do not skip launching a worker, or substitute an orchestrator's own direct checks for a required worker run, based on an assumption that `--auto` is unsafe or unsupported for read-only tasks — test the documented command before concluding it can't be used.
 - **Unrestricted execution**: only if the user explicitly requests it
 
 ## Resume

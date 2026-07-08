@@ -44,6 +44,7 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "started_at": "2026-07-04T01:35:00Z",
     "before_head": "<commit HEAD immediately before this slice attempt started>",
     "orchestrator_session_id": "<optional Claude session id for transcript capture>",
+    "worker_tools": ["<tool names required for this slice attempt, empty if none>"],
     "pause": null
   },
   "supervision": {
@@ -238,7 +239,8 @@ Runtime slices append entries to `slices`:
   },
   "next_action": "",
   "blockers": [],
-  "gate_reason": "all gates passed"
+  "gate_reason": "all gates passed",
+  "worker_tools": ["<tool names required for this slice attempt, empty if none>"]
 }
 ```
 
@@ -309,5 +311,7 @@ Allowed orchestrator `status` values:
 - `blocked`
 
 MC verifies this result against git state, artifacts, validation output, drift audit, code review, and commit state before accepting a slice.
+
+When a run specifies required worker tool(s) (`--worker-tools`), MC additionally requires mechanical evidence that a worker actually ran before it will accept a `pass`: a non-empty `worker-evidence.md` in the slice artifact directory, and a `worker-runs-summary.json` containing at least one worker entry (built only from real `worker_jobs.py` `manifest.json` / `*-status.json` artifacts, so it cannot be satisfied by prose alone). An orchestrator that narrates why it chose not to launch a required worker, or substitutes its own direct checks and calls that "insufficient" evidence, does not satisfy this gate — it fails like any other unmet contract requirement, even if validation, drift audit, and code review all pass. This closes a gap observed in testing: an orchestrator self-declared its own worker evidence "insufficient" per the plan's "stop and report why no worker was available" instruction, but nothing previously stopped it from proceeding through commit anyway. The required worker tool(s) for a slice attempt are persisted at `current_slice.worker_tools` and carried into each slice entry's `worker_tools` field so `finalize-slice` and `reconcile` (separate invocations from the one that started the slice) can recover the requirement without depending on that invocation's own `--worker-tools` flag.
 
 When all authorization, validation, drift, review, changed-file, ancestry, and clean-worktree evidence passes but `commit.hash` is wrong or abbreviated, MC may reconcile that evidence field to the proven current `HEAD`, write `mc-reconciliation.json` / `mc-reconciliation.md`, update `orchestrator-result.json`, and accept the slice. This reconciliation is limited to commit-hash evidence; it must not mask unauthorized files, missing validation, failed audits/reviews, dirty worktrees, or missing commits.
