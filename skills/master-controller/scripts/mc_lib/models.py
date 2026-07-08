@@ -86,3 +86,7 @@ class GateDecision:
     reason: str
     result: dict[str, Any] | None = None
     actual_changed_files: tuple[str, ...] = ()
+    # Coarse, stable failure-category label (e.g. "validation", "drift",
+    # "integrity-head"). Drives the repair circuit breaker and repair-prompt
+    # stanza selection; empty for a pass and for statuses with no category.
+    signature: str = ""

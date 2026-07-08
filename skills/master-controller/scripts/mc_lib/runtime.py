@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .constants import HARNESS_PROFILES, SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
-from .models import McError, PlanSlice
+from .git_ops import meaningful_status_lines, unauthorized_files
+from .models import GateDecision, McError, PlanSlice
 
 
 _WORKER_JOBS_MODULE: Any = None
@@ -618,6 +620,121 @@ def render_orchestrator_prompt(
         "risk_flags": plan_slice.sections.get("Risk Flags", ""),
         "validation_plan": plan_slice.sections.get("Validation Plan", ""),
         "rollback_path": plan_slice.sections.get("Rollback Path", ""),
+    }
+    return template.format(**values).rstrip() + "\n"
+
+
+def load_repair_template() -> str:
+    # Same str.format constraint as load_prompt_template: only the documented
+    # placeholders may appear as braces in the repair block.
+    path = skill_root() / "references" / "orchestrator-prompt.md"
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"## Repair Template\n.*?```md\n(?P<template>.*?)\n```", text, flags=re.DOTALL)
+    if not match:
+        raise McError(f"repair prompt template not found in {path}")
+    return match.group("template")
+
+
+# Gate signatures whose repair keeps the implementation and commit untouched
+# and fixes only the named evidence/quality gap.
+_EVIDENCE_GATE_LABELS = {
+    "validation": "validation",
+    "drift": "drift audit",
+    "review": "code review",
+    "worker-evidence": "worker evidence",
+}
+
+
+def _repair_stanza(
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    gate: GateDecision,
+    before_head: str | None,
+) -> str:
+    signature = gate.signature
+    if signature in _EVIDENCE_GATE_LABELS:
+        label = _EVIDENCE_GATE_LABELS[signature]
+        return (
+            "Your code changes and any commit you already created are present and correct as far as MC verified; "
+            f"do NOT re-implement the slice and do NOT redo work that already passed. Fix only the {label} gap "
+            f"quoted above: re-run that gate properly, write its evidence artifact under the slice artifact "
+            "directory, and record the passing outcome in `orchestrator-result.json`."
+        )
+    if signature == "unauthorized-files":
+        offending = unauthorized_files(set(gate.actual_changed_files), plan_slice.authorized_files)
+        start = before_head or "<the slice starting commit recorded by MC>"
+        if offending:
+            # shlex-quoted so a path with spaces or metacharacters stays one
+            # argument when the orchestrator copies the command literally.
+            restore_command = shlex.join(["git", "checkout", start, "--", *offending])
+        else:
+            restore_command = f"git checkout {start} -- <the files named in the gate reason>"
+        return (
+            "These files are OUTSIDE your authorized surface: "
+            + (", ".join(offending) if offending else "(see the gate reason above)")
+            + ". This repair is restore-only: restore those exact paths to their pre-slice committed content with\n\n"
+            + f"    {restore_command}\n\n"
+            + "and touch nothing else. Do not otherwise edit, fix, or improve anything outside your authorized files."
+        )
+    if signature == "changed-files-mismatch":
+        actual = ", ".join(gate.actual_changed_files) if gate.actual_changed_files else "(no changed files)"
+        return (
+            "Your self-reported `changed_files` does not match git evidence. No file edits are needed: correct the "
+            f"`changed_files` list in `orchestrator-result.json` to exactly match the actual diff: {actual}."
+        )
+    if signature == "commit-missing":
+        return (
+            "Your gates passed but the required commit was never created. use the commit skill for this slice's "
+            "work only, then record the commit in `orchestrator-result.json`."
+        )
+    if signature == "dirty-worktree":
+        status_path = slice_artifact_dir / "git-status-after.txt"
+        status_lines = meaningful_status_lines(status_path.read_text(encoding="utf-8")) if status_path.is_file() else []
+        listing = "\n".join(status_lines) if status_lines else "(see the gate reason above)"
+        return (
+            "The worktree has uncommitted changes outside `.ai-mc/` after your commit:\n\n"
+            + listing
+            + "\n\nResolve them within your authorized surface — commit authorized slice work or restore stray "
+            "edits to their committed content — so the worktree ends clean."
+        )
+    if signature == "result-malformed":
+        return (
+            "Your `orchestrator-result.json` is unreadable or invalid (see the gate reason above). Your file edits "
+            "may be fine; rewrite `orchestrator-result.json` so it is valid JSON matching the required schema, "
+            "reporting this same slice honestly."
+        )
+    if signature == "orchestrator-repairable":
+        return (
+            "You reported status `repairable` yourself. Resume this same slice: complete the remaining work inside "
+            "the frozen contract, re-run validation, the drift-audit skill, and the code-review skill, and write a "
+            "fresh `orchestrator-result.json`."
+        )
+    raise McError(f"no repair stanza defined for gate signature: {signature!r}")
+
+
+def render_repair_prompt(
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    gate: GateDecision,
+    before_head: str | None = None,
+) -> str:
+    """Render a targeted in-session correction for a repairable gate failure.
+
+    Composes only from data already on hand (the gate decision, the frozen
+    slice contract, and evidence files in the slice artifact directory); it
+    never re-derives or relaxes the gate.
+    """
+    template = load_repair_template()
+    authorized = "\n".join(f"- {entry}" for entry in plan_slice.authorized_files) or "- (none parsed from the plan)"
+    values = {
+        "slice_id": plan_slice.slice_id,
+        "slice_title": plan_slice.title,
+        "gate_reason": gate.reason,
+        "gate_signature": gate.signature,
+        "category_stanza": _repair_stanza(plan_slice, slice_artifact_dir, gate, before_head),
+        "authorized_files": authorized,
+        "slice_artifact_dir": str(slice_artifact_dir),
+        "result_schema_path": str(result_schema_path()),
     }
     return template.format(**values).rstrip() + "\n"
 

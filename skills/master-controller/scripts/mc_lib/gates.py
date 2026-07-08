@@ -16,6 +16,53 @@ from .models import GateDecision, McError, PlanSlice
 from .utils import utc_now
 
 
+# Failure-signature taxonomy: every non-pass classification MC makes itself
+# carries one of these coarse, stable labels. The repair loop keys its circuit
+# breaker on them and the repair-prompt renderer selects its correction stanza
+# by them, so they are the single source of truth for which violations are
+# repairable (steer the live orchestrator session) versus terminal
+# (integrity/trust breach — do not steer from a false-belief context; stop for
+# a human). Re-verification after a repair re-runs the *identical* gate, so a
+# repairable classification can never let a bad slice through — it only grants
+# another chance to satisfy the same gate.
+REPAIRABLE_SIGNATURES = frozenset(
+    {
+        "validation",
+        "drift",
+        "review",
+        "worker-evidence",
+        "unauthorized-files",
+        "changed-files-mismatch",
+        "result-malformed",
+        "commit-missing",
+        "dirty-worktree",
+        "orchestrator-repairable",
+    }
+)
+TERMINAL_SIGNATURES = frozenset(
+    {
+        "integrity-head",
+        "slice-id-mismatch",
+    }
+)
+
+
+def gate_failure(
+    signature: str,
+    reason: str,
+    result: dict[str, Any] | None = None,
+    actual_changed_files: tuple[str, ...] = (),
+) -> GateDecision:
+    """Build a non-pass GateDecision whose status follows the signature taxonomy."""
+    if signature in TERMINAL_SIGNATURES:
+        status = "needs-human"
+    elif signature in REPAIRABLE_SIGNATURES:
+        status = "repairable"
+    else:
+        raise McError(f"unknown gate failure signature: {signature}")
+    return GateDecision(status, reason, result, actual_changed_files, signature)
+
+
 def write_reconciliation_artifact(
     slice_artifact_dir: Path,
     *,
@@ -222,68 +269,88 @@ def verify_gate(
     worker_tools: tuple[str, ...] = (),
 ) -> GateDecision:
     result_path = slice_artifact_dir / "orchestrator-result.json"
+    if not result_path.is_file():
+        # Absence is not a content defect: the session may have died or timed
+        # out without answering, which the runner handles as its own condition
+        # (relaunch/stop), not as a steerable in-session repair.
+        return GateDecision("blocked", f"orchestrator result missing: {result_path}")
     try:
         result = load_orchestrator_result(result_path)
     except McError as exc:
-        return GateDecision("blocked", str(exc))
+        return gate_failure("result-malformed", str(exc))
 
     if result.get("schema_version") != SCHEMA_VERSION:
-        return GateDecision("fail", "orchestrator result schema_version is missing or unsupported", result)
+        return gate_failure("result-malformed", "orchestrator result schema_version is missing or unsupported", result)
     if result.get("slice_id") != plan_slice.slice_id:
-        return GateDecision("fail", "orchestrator result slice_id does not match selected slice", result)
+        # The orchestrator worked (or reported on) the wrong slice: continuing
+        # to steer from that context would build on a false belief about which
+        # contract is in force.
+        return gate_failure("slice-id-mismatch", "orchestrator result slice_id does not match selected slice", result)
 
     status_value = str(result.get("status", "")).lower()
     if status_value not in ORCHESTRATOR_STATUSES:
-        return GateDecision("fail", f"orchestrator result status is invalid: {result.get('status')}", result)
+        return gate_failure("result-malformed", f"orchestrator result status is invalid: {result.get('status')}", result)
     if status_value != "pass":
-        return GateDecision(status_value, f"orchestrator reported {status_value}", result)
+        # The orchestrator's own self-report is respected as-is: its
+        # `repairable` earns a repair round, and its considered stops
+        # (needs-human/fail/blocked) stay terminal with no MC signature.
+        signature = "orchestrator-repairable" if status_value == "repairable" else ""
+        return GateDecision(status_value, f"orchestrator reported {status_value}", result, signature=signature)
 
     actual_changed = changed_files_between(repo, before_head, after_head, after_status)
     changed_evidence = tuple(sorted(actual_changed))
     unauthorized = unauthorized_files(actual_changed, plan_slice.authorized_files)
     if unauthorized:
-        return GateDecision("fail", "unauthorized changed files: " + ", ".join(unauthorized), result, changed_evidence)
+        # Repairable, but restore-only: the repair prompt for this signature is
+        # bounded to restoring these exact paths to their pre-slice content,
+        # never to editing outside the authorized surface.
+        return gate_failure("unauthorized-files", "unauthorized changed files: " + ", ".join(unauthorized), result, changed_evidence)
 
     reported_files = result.get("changed_files")
     if not isinstance(reported_files, list) or not all(isinstance(item, str) for item in reported_files):
-        return GateDecision("fail", "orchestrator changed_files is malformed (expected a list of paths)", result, changed_evidence)
+        # Same signature as the mismatch below: both defects have the identical
+        # bookkeeping fix (rewrite changed_files to match the actual diff).
+        return gate_failure("changed-files-mismatch", "orchestrator changed_files is malformed (expected a list of paths)", result, changed_evidence)
     if actual_changed != set(reported_files):
-        return GateDecision("fail", "orchestrator changed_files does not match git evidence", result, changed_evidence)
+        return gate_failure("changed-files-mismatch", "orchestrator changed_files does not match git evidence", result, changed_evidence)
 
     validation_failure = _validation_status(result.get("validation"))
     if validation_failure:
-        return GateDecision("fail", validation_failure, result, changed_evidence)
+        return gate_failure("validation", validation_failure, result, changed_evidence)
     if not (slice_artifact_dir / "validation-summary.md").exists():
-        return GateDecision("fail", "validation-summary.md is missing", result, changed_evidence)
+        return gate_failure("validation", "validation-summary.md is missing", result, changed_evidence)
 
     drift_verdict = str(object_field(result, "drift_audit").get("verdict", "")).upper()
     if drift_verdict != "PASS":
-        return GateDecision("needs-human", f"drift audit verdict is not PASS: {drift_verdict or 'missing'}", result, changed_evidence)
+        return gate_failure("drift", f"drift audit verdict is not PASS: {drift_verdict or 'missing'}", result, changed_evidence)
     if not artifact_exists(repo, slice_artifact_dir, result, "drift_audit", "drift-audit.md"):
-        return GateDecision("fail", "drift audit artifact is missing", result, changed_evidence)
+        return gate_failure("drift", "drift audit artifact is missing", result, changed_evidence)
 
     review_verdict = str(object_field(result, "code_review").get("verdict", "")).upper()
     if review_verdict != "PASS":
-        return GateDecision("fail", f"code review verdict is not PASS: {review_verdict or 'missing'}", result, changed_evidence)
+        return gate_failure("review", f"code review verdict is not PASS: {review_verdict or 'missing'}", result, changed_evidence)
     if not artifact_exists(repo, slice_artifact_dir, result, "code_review", "code-review.md"):
-        return GateDecision("fail", "code review artifact is missing", result, changed_evidence)
+        return gate_failure("review", "code review artifact is missing", result, changed_evidence)
 
     worker_failure = worker_evidence_failure(slice_artifact_dir, worker_tools)
     if worker_failure:
-        return GateDecision("fail", worker_failure, result, changed_evidence)
+        return gate_failure("worker-evidence", worker_failure, result, changed_evidence)
 
     commit = result.get("commit") if isinstance(result.get("commit"), dict) else {}
     if state.get("policy", {}).get("commit_required", True):
         if not commit.get("requested") or not commit.get("created") or not commit.get("hash"):
-            return GateDecision("fail", "required commit was not created", result, changed_evidence)
+            return gate_failure("commit-missing", "required commit was not created", result, changed_evidence)
         if meaningful_status_lines(after_status):
-            return GateDecision("fail", "post-commit worktree is dirty outside .ai-mc/", result, changed_evidence)
+            return gate_failure("dirty-worktree", "post-commit worktree is dirty outside .ai-mc/", result, changed_evidence)
+        # Integrity gates run on git evidence alone, before any comparison with
+        # the self-reported hash: a truthful report of a reset-to-unrelated
+        # HEAD must fail here, not pass because the strings happen to match.
         if not after_head or after_head == before_head:
-            return GateDecision("fail", "required commit did not advance HEAD", result, changed_evidence)
+            return gate_failure("integrity-head", "required commit did not advance HEAD", result, changed_evidence)
+        if not commit_is_descendant(repo, before_head, after_head):
+            return gate_failure("integrity-head", "current HEAD is not descended from the slice starting commit", result, changed_evidence)
         reported_hash = str(commit["hash"])
         if reported_hash != after_head:
-            if not commit_is_descendant(repo, before_head, after_head):
-                return GateDecision("fail", "current HEAD is not descended from the slice starting commit", result, changed_evidence)
             # An abbreviated-but-correct hash and an outright-wrong hash both
             # differ from the proven full HEAD as strings and land here; the
             # only difference is the message we record.

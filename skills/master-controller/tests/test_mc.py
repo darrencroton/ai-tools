@@ -573,6 +573,152 @@ Continue later.
         self.assertIn("`--effort <effort>`", prompt)
         self.assertIn("- copilot: For Copilot workers, use `--model <model>`", prompt)
 
+    def test_repair_prompt_covers_every_repairable_signature(self):
+        # Every repairable signature must render a complete prompt (no
+        # KeyError/IndexError from stray braces) that states the slice is not
+        # accepted, quotes the gate reason, re-anchors the authorized surface,
+        # and repeats the invariant instructions.
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        from mc_lib.gates import REPAIRABLE_SIGNATURES
+
+        # One distinctive stanza marker per repairable signature, so a wrong
+        # stanza selection cannot pass on the shared invariants alone.
+        stanza_markers = {
+            "validation": "Fix only the validation gap",
+            "drift": "Fix only the drift audit gap",
+            "review": "Fix only the code review gap",
+            "worker-evidence": "Fix only the worker evidence gap",
+            "unauthorized-files": "restore-only",
+            "changed-files-mismatch": "No file edits are needed",
+            "result-malformed": "valid JSON matching the required schema",
+            "commit-missing": "commit skill",
+            "dirty-worktree": "uncommitted changes outside `.ai-mc/`",
+            "orchestrator-repairable": "You reported status `repairable` yourself",
+        }
+        self.assertEqual(set(stanza_markers), set(REPAIRABLE_SIGNATURES))
+
+        for signature in sorted(REPAIRABLE_SIGNATURES):
+            gate = mc.GateDecision(
+                "repairable",
+                f"gate reason for {signature} with literal {{braces}} kept",
+                None,
+                ("README.md",),
+                signature=signature,
+            )
+            prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate, before_head="a" * 40)
+            self.assertIn("NOT accepted", prompt, signature)
+            self.assertIn(f"gate reason for {signature} with literal {{braces}} kept", prompt)
+            self.assertIn(f"category: {signature}", prompt)
+            self.assertIn(stanza_markers[signature], prompt, signature)
+            self.assertIn("- README.md", prompt)
+            self.assertIn("Do not change any other file.", prompt)
+            self.assertIn("orchestrator-result.json", prompt)
+            self.assertIn("git rev-parse HEAD", prompt)
+            self.assertIn("Slice 1", prompt)
+
+    def test_repair_prompt_worker_evidence_preserves_existing_work(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        gate = mc.GateDecision(
+            "repairable",
+            "required worker tool(s) (opencode) were never actually invoked",
+            None,
+            ("README.md",),
+            signature="worker-evidence",
+        )
+        prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate, before_head="a" * 40)
+        self.assertIn("do NOT re-implement", prompt)
+        self.assertIn("worker evidence", prompt)
+        self.assertIn("were never actually invoked", prompt)
+
+    def test_repair_prompt_unauthorized_files_is_restore_only(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        before = "b" * 40
+        gate = mc.GateDecision(
+            "repairable",
+            "unauthorized changed files: EVIL.md",
+            None,
+            ("EVIL.md", "README.md"),
+            signature="unauthorized-files",
+        )
+        prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate, before_head=before)
+        self.assertIn("OUTSIDE your authorized surface: EVIL.md", prompt)
+        self.assertIn(f"git checkout {before} -- EVIL.md", prompt)
+        self.assertIn("touch nothing else", prompt)
+        # The authorized file must not be named in the restore command.
+        self.assertNotIn(f"git checkout {before} -- EVIL.md README.md", prompt)
+
+    def test_repair_prompt_unauthorized_files_quotes_awkward_paths(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        before = "c" * 40
+        gate = mc.GateDecision(
+            "repairable",
+            "unauthorized changed files: bad name.md, glob*.md",
+            None,
+            ("bad name.md", "glob*.md"),
+            signature="unauthorized-files",
+        )
+        prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate, before_head=before)
+        # Paths with spaces or metacharacters must survive a literal copy of
+        # the restore command as single arguments.
+        self.assertIn(f"git checkout {before} -- 'bad name.md' 'glob*.md'", prompt)
+
+    def test_repair_prompt_changed_files_mismatch_needs_no_edits(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        gate = mc.GateDecision(
+            "repairable",
+            "orchestrator changed_files does not match git evidence",
+            None,
+            ("README.md",),
+            signature="changed-files-mismatch",
+        )
+        prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate)
+        self.assertIn("No file edits are needed", prompt)
+        self.assertIn("exactly match the actual diff: README.md", prompt)
+
+    def test_repair_prompt_dirty_worktree_lists_meaningful_status(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        (artifact / "git-status-after.txt").write_text("M  README.md\n?? .ai-mc/scratch.txt\n", encoding="utf-8")
+        gate = mc.GateDecision(
+            "repairable",
+            "post-commit worktree is dirty outside .ai-mc/",
+            None,
+            ("README.md",),
+            signature="dirty-worktree",
+        )
+        prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate)
+        self.assertIn("M  README.md", prompt)
+        self.assertNotIn(".ai-mc/scratch.txt", prompt)
+
+    def test_repair_prompt_fails_closed_on_unknown_signature(self):
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        gate = mc.GateDecision("repairable", "reason", None, (), signature="mystery")
+        with self.assertRaisesRegex(mc.McError, "no repair stanza"):
+            mc_runtime.render_repair_prompt(plan_slice, artifact, gate)
+
+    def test_repair_template_does_not_change_main_prompt_template(self):
+        # The repair block is a second fenced template in the same reference
+        # file; the main loader must still pick the original block.
+        template = mc.load_prompt_template()
+        self.assertIn("You are the slice orchestrator for Master Controller.", template)
+        self.assertNotIn("NOT accepted", template)
+        repair = mc_runtime.load_repair_template()
+        self.assertIn("NOT accepted", repair)
+        self.assertNotIn("Worker helper sequence", repair)
+
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
@@ -1161,7 +1307,8 @@ Continue later.
         self.write_gate_result(artifact, changed_files=["UNAUTHORIZED.md"], commit_hash=after)
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "unauthorized-files")
         self.assertIn("unauthorized changed files", decision.reason)
 
     def test_gate_blocks_missing_validation(self):
@@ -1175,7 +1322,8 @@ Continue later.
         self.write_gate_result(artifact, changed_files=["README.md"], validation_result=None, commit_hash=after)
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "validation")
         self.assertIn("validation evidence is missing", decision.reason)
 
     def test_gate_blocks_pass_with_risks_drift(self):
@@ -1189,7 +1337,8 @@ Continue later.
         self.write_gate_result(artifact, changed_files=["README.md"], drift="PASS WITH RISKS", commit_hash=after)
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "drift")
         self.assertIn("drift audit verdict is not PASS", decision.reason)
 
     def test_gate_blocks_failed_review(self):
@@ -1203,7 +1352,8 @@ Continue later.
         self.write_gate_result(artifact, changed_files=["README.md"], review="FAIL", commit_hash=after)
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "review")
         self.assertIn("code review verdict is not PASS", decision.reason)
 
     def test_gate_fails_closed_on_malformed_audit_objects(self):
@@ -1232,7 +1382,8 @@ Continue later.
         )
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "drift")
         self.assertIn("drift audit verdict is not PASS", decision.reason)
 
     def test_gate_accepts_repo_relative_artifact_paths(self):
@@ -1265,6 +1416,7 @@ Continue later.
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "pass")
+        self.assertEqual(decision.signature, "")
 
     def test_gate_reconciles_fabricated_commit_hash_when_local_evidence_is_clear(self):
         self.prepare_committed_repo()
@@ -1297,8 +1449,172 @@ Continue later.
 
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
 
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.signature, "integrity-head")
         self.assertIn("did not advance HEAD", decision.reason)
+
+    def test_gate_blocks_reset_to_unrelated_head_even_with_truthful_hash(self):
+        # Codex #4: an orchestrator that resets to a commit not descended from
+        # the slice start and *truthfully* reports that HEAD must fail the
+        # integrity gate, not pass because reported_hash == after_head skipped
+        # the reconciliation branch where the descendant check used to live.
+        self.prepare_committed_repo()
+        base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Slice start")
+        before = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "reset", "--hard", base)
+        (self.repo / "README.md").write_text("unrelated line of history\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Unrelated history")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.signature, "integrity-head")
+        self.assertIn("not descended from the slice starting commit", decision.reason)
+
+    def test_gate_classifies_changed_files_mismatch_as_repairable(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md", "CHANGELOG.md"], commit_hash=after)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "changed-files-mismatch")
+        self.assertIn("does not match git evidence", decision.reason)
+
+    def test_gate_classifies_commit_missing_as_repairable(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=None)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "commit-missing")
+        self.assertIn("required commit was not created", decision.reason)
+
+    def test_gate_classifies_dirty_worktree_as_repairable(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        # Staged but uncommitted: status shows "M  README.md" with the status
+        # code in column 0, which survives the git() helper's stdout strip()
+        # (an unstaged " M" first line would lose its leading space and mangle
+        # the parsed path — a pre-existing git_ops parsing quirk outside this
+        # slice's surface).
+        (self.repo / "README.md").write_text("uncommitted follow-up\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "dirty-worktree")
+        self.assertIn("worktree is dirty", decision.reason)
+
+    def test_gate_classifies_malformed_result_as_repairable(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        (artifact / "orchestrator-result.json").write_text("{not json", encoding="utf-8")
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "result-malformed")
+        self.assertIn("invalid orchestrator result", decision.reason)
+
+    def test_gate_classifies_schema_and_status_errors_as_result_malformed(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        state = self.init_run()
+        plan_slice = mc.parse_plan(self.plan)[0]
+
+        self.write_gate_result_data(artifact, {"schema_version": 99, "slice_id": "Slice 1", "status": "pass"})
+        decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "result-malformed")
+        self.assertIn("schema_version", decision.reason)
+
+        self.write_gate_result_data(artifact, {"schema_version": 1, "slice_id": "Slice 1", "status": "victory"})
+        decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "result-malformed")
+        self.assertIn("status is invalid", decision.reason)
+
+    def test_gate_blocks_missing_result_without_repair_signature(self):
+        # Absence of orchestrator-result.json is a runner condition (dead or
+        # unresponsive session), not a steerable content defect: it stays
+        # terminal `blocked` with no repair signature.
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "blocked")
+        self.assertEqual(decision.signature, "")
+        self.assertIn("orchestrator result missing", decision.reason)
+
+    def test_gate_classifies_slice_id_mismatch_as_terminal(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result_data(artifact, {"schema_version": 1, "slice_id": "Slice 2", "status": "pass"})
+        state = self.init_run()
+
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
+
+        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.signature, "slice-id-mismatch")
+        self.assertIn("slice_id does not match", decision.reason)
+
+    def test_gate_passes_through_orchestrator_self_report_signatures(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        state = self.init_run()
+        plan_slice = mc.parse_plan(self.plan)[0]
+
+        self.write_gate_result_data(artifact, {"schema_version": 1, "slice_id": "Slice 1", "status": "repairable"})
+        decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "orchestrator-repairable")
+
+        self.write_gate_result_data(artifact, {"schema_version": 1, "slice_id": "Slice 1", "status": "needs-human"})
+        decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.signature, "")
 
     def test_gate_blocks_pass_when_required_worker_never_launched(self):
         self.prepare_committed_repo()
@@ -1315,7 +1631,8 @@ Continue later.
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
         self.assertIn("have no worker-evidence.md", decision.reason)
 
     def test_gate_blocks_pass_when_worker_evidence_is_narration_without_a_launch(self):
@@ -1343,7 +1660,8 @@ Continue later.
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
         self.assertIn("no worker was started in it", decision.reason)
 
     def test_gate_accepts_pass_when_required_worker_has_real_run_evidence(self):
@@ -1412,7 +1730,8 @@ Continue later.
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
         self.assertIn("were never actually invoked", decision.reason)
 
     def test_gate_ignores_worker_evidence_when_no_worker_tool_is_required(self):
@@ -2230,7 +2549,8 @@ Continue later.
         )
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "validation")
         self.assertIn("validation entries are malformed", decision.reason)
 
     def test_gate_fails_closed_on_string_changed_files(self):
@@ -2255,7 +2575,8 @@ Continue later.
         )
         state = self.init_run()
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
-        self.assertEqual(decision.status, "fail")
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "changed-files-mismatch")
         self.assertIn("changed_files is malformed", decision.reason)
 
     def test_artifact_exists_requires_nonempty_in_tree_file(self):

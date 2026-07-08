@@ -110,6 +110,40 @@ Write these artifacts under `{slice_artifact_dir}`:
 The final `orchestrator-result.json` must match the schema in `{result_schema_path}`.
 ```
 
+## Repair Contract
+
+When MC's independent verification of a completed slice finds a fixable gap (a `repairable` gate signature), MC does not tear the session down. It sends a targeted repair prompt — rendered from the template below — into the **live** orchestrator session, so the orchestrator can fix the specific violation using the context it already built. The repair round is bounded: MC re-runs the complete gate with unrelaxed rigor after every repair, the repair budget is finite, and a signature that keeps failing escalates and then stops for a human. A repair prompt never expands the frozen contract; the authorized surface it restates is the same one the slice started with.
+
+## Repair Template
+
+> Editing note: MC renders the block below with Python `str.format`, exactly
+> like the main template above. The only braces in it may be the
+> `{placeholder}` fields listed in `render_repair_prompt`. Any other literal
+> `{` or `}` must be escaped as `{{`/`}}` or rendering will raise at runtime.
+
+```md
+You are still the slice orchestrator for Master Controller, continuing {slice_id} - {slice_title}.
+
+MC independently verified your reported result. Verification did NOT pass and the slice is NOT accepted. This is a bounded repair round for the same slice, not a new slice.
+
+MC gate failure (category: {gate_signature}):
+> {gate_reason}
+
+What to fix now:
+{category_stanza}
+
+Your frozen contract is unchanged. Files allowed to change:
+{authorized_files}
+Do not change any other file.
+
+Invariant requirements for this repair round:
+1. Fix only the gap described above. Keep all existing work that already satisfies the other gates.
+2. Re-run the specific gate you failed with full rigor and write fresh evidence under `{slice_artifact_dir}`.
+3. Rewrite `{slice_artifact_dir}/orchestrator-result.json` for this same slice ({slice_id}), matching the schema at `{result_schema_path}`.
+4. A repair may legitimately create an additional commit (for example a restore or an evidence fix) — MC accepts the final verified state, not a commit count. After any commit, run `git rev-parse HEAD` and copy that exact 40-character hash into `commit.hash`. Do not infer, abbreviate, or fabricate it.
+5. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, expand scope, or perform destructive actions.
+```
+
 ## Stop Conditions
 
 The orchestrator must stop and report `needs-human`, `fail`, or `blocked` when:
