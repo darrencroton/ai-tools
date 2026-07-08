@@ -743,8 +743,11 @@ def slice_dir_name(plan_slice: PlanSlice) -> str:
     return f"slice-{plan_slice.number:03d}"
 
 
-def tmux_session_name(run_id_value: str, plan_slice: PlanSlice, attempt: int) -> str:
-    raw = f"mc_{run_id_value}_{slice_dir_name(plan_slice)}_a{attempt}"
+def tmux_session_name(run_id_value: str, plan_slice: PlanSlice, generation: int) -> str:
+    # Keyed on the session generation, which increments only when a fresh tmux
+    # session is launched. In-session repair rounds share one generation, so
+    # the session name (and the live session) stays constant across them.
+    raw = f"mc_{run_id_value}_{slice_dir_name(plan_slice)}_a{generation}"
     return re.sub(r"[^A-Za-z0-9_-]", "_", raw)[:80]
 
 

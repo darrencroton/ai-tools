@@ -13,6 +13,7 @@ from typing import Any
 
 from .constants import (
     COMPLETED_SLICE_STATUSES,
+    DEFAULT_MAX_REPAIR_ATTEMPTS,
     DEFAULT_SUPERVISION,
     HARNESS_PROFILES,
     OPERATIONAL_EVENTS_FILENAME,
@@ -149,7 +150,7 @@ def init_run(args: argparse.Namespace) -> int:
         "policy": {
             "dirty_state": "clean-required",
             "approval_gated_slices": "stop",
-            "max_repair_attempts": 1,
+            "max_repair_attempts": DEFAULT_MAX_REPAIR_ATTEMPTS,
             "commit_required": True,
         },
         "plan": {

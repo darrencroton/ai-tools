@@ -140,6 +140,10 @@ def idle_status_after_pass(state: dict[str, Any]) -> str:
     return "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "partial"
 
 
+def default_repair_state() -> dict[str, Any]:
+    return {"round": 0, "last_signature": "", "signature_streak": 0, "session_generation": 1}
+
+
 def current_slice_state(
     repo: Path,
     plan_slice: PlanSlice,
@@ -150,6 +154,7 @@ def current_slice_state(
     before_head: str | None,
     orchestrator_session_id: str | None = None,
     worker_tools: tuple[str, ...] = (),
+    repair: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = {
         "slice_id": plan_slice.slice_id,
@@ -165,6 +170,11 @@ def current_slice_state(
         # this slice attempt without depending on that invocation's own
         # --worker-tools flag, which may not be re-supplied.
         "worker_tools": list(worker_tools),
+        # Repair-loop progress for this slice: {round, last_signature,
+        # signature_streak, session_generation}. Budget and circuit-breaker
+        # decisions are driven from this persisted state, not from counting
+        # appended slice entries (in-session repairs append none).
+        "repair": dict(repair) if repair is not None else default_repair_state(),
     }
     if orchestrator_session_id:
         state["orchestrator_session_id"] = orchestrator_session_id
@@ -179,9 +189,10 @@ def slice_entry_from_gate(
     gate: GateDecision,
     before_head: str | None = None,
     worker_tools: tuple[str, ...] = (),
+    repair: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = gate.result or {}
-    return {
+    entry = {
         "slice_id": plan_slice.slice_id,
         "title": plan_slice.title,
         "status": gate.status,
@@ -204,6 +215,11 @@ def slice_entry_from_gate(
         # requirement for this attempt without a fresh --worker-tools flag.
         "worker_tools": list(worker_tools),
     }
+    # Recorded only when repair rounds were actually used, so a slice that
+    # passes first-attempt keeps the exact pre-repair-loop entry shape.
+    if repair is not None:
+        entry["repair"] = dict(repair)
+    return entry
 
 
 def previous_completed_head(state: dict[str, Any], slice_id: str) -> str | None:

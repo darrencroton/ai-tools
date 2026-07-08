@@ -289,6 +289,204 @@ def write_repairable_then_pass_harness(path):
     )
 
 
+_STDIN_RAW_PREAMBLE = """
+import json
+import os
+import subprocess
+import sys
+import termios
+import time
+from pathlib import Path
+
+artifact = Path(os.environ["MC_SLICE_ARTIFACT_DIR"])
+slice_id = os.environ["MC_SLICE_ID"]
+attrs = termios.tcgetattr(sys.stdin)
+attrs[3] = attrs[3] & ~(termios.ECHO | termios.ICANON)
+attrs[6][termios.VMIN] = 0
+attrs[6][termios.VTIME] = 1
+termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+
+
+def write_failing_validation_result():
+    (artifact / "orchestrator-result.json").write_text(json.dumps({
+        "schema_version": 1,
+        "slice_id": slice_id,
+        "status": "pass",
+        "summary": "no validation yet",
+        "changed_files": [],
+        "validation": [],
+        "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+        "code_review": {"verdict": "PASS", "path": "code-review.md"},
+        "commit": {"requested": False, "created": False, "hash": None},
+        "next_action": "",
+        "blockers": [],
+    }), encoding="utf-8")
+
+
+def wait_for_repair_prompt(deadline_seconds=25):
+    seen = ""
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        chunk = os.read(sys.stdin.fileno(), 4096).decode(errors="ignore")
+        if chunk:
+            seen += chunk
+        if "NOT accepted" in seen:
+            return True
+        time.sleep(0.05)
+    return False
+"""
+
+
+def write_in_session_repair_harness(path):
+    # Fails the validation gate once, then completes the slice properly when
+    # the repair prompt arrives in the same session.
+    path.write_text(
+        _STDIN_RAW_PREAMBLE
+        + textwrap.dedent(
+            """
+            write_failing_validation_result()
+            if not wait_for_repair_prompt():
+                raise SystemExit(3)
+            Path("README.md").write_text("repaired in session\\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], check=True)
+            subprocess.run(["git", "commit", "-m", "Complete repaired slice"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+            (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
+            (artifact / "orchestrator-result.json").write_text(json.dumps({
+                "schema_version": 1,
+                "slice_id": slice_id,
+                "status": "pass",
+                "summary": "repaired in session",
+                "changed_files": ["README.md"],
+                "validation": [{"command": "toy validation", "result": "pass", "notes": ""}],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": True, "created": True, "hash": commit_hash},
+                "next_action": "",
+                "blockers": [],
+            }), encoding="utf-8")
+            time.sleep(2)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_always_failing_validation_harness(path):
+    # Keeps failing the same validation gate on every round, in every session,
+    # so the signature-keyed circuit breaker escalates and then trips.
+    path.write_text(
+        _STDIN_RAW_PREAMBLE
+        + textwrap.dedent(
+            """
+            write_failing_validation_result()
+            while True:
+                if not wait_for_repair_prompt():
+                    raise SystemExit(0)
+                write_failing_validation_result()
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_alternating_failure_harness(path):
+    # Alternates between two different repairable signatures (validation,
+    # review) so the same-signature circuit breaker never trips and the
+    # default repair budget is what ends the run.
+    path.write_text(
+        _STDIN_RAW_PREAMBLE
+        + textwrap.dedent(
+            """
+            def write_failing_review_result():
+                (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
+                (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
+                (artifact / "orchestrator-result.json").write_text(json.dumps({
+                    "schema_version": 1,
+                    "slice_id": slice_id,
+                    "status": "pass",
+                    "summary": "review failed",
+                    "changed_files": [],
+                    "validation": [{"command": "toy validation", "result": "pass", "notes": ""}],
+                    "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                    "code_review": {"verdict": "FAIL", "path": "code-review.md"},
+                    "commit": {"requested": False, "created": False, "hash": None},
+                    "next_action": "",
+                    "blockers": [],
+                }), encoding="utf-8")
+
+            round_index = 0
+            write_failing_validation_result()
+            while True:
+                if not wait_for_repair_prompt():
+                    raise SystemExit(0)
+                round_index += 1
+                if round_index % 2 == 0:
+                    write_failing_validation_result()
+                else:
+                    write_failing_review_result()
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_hard_prompt_at_repair_harness(path):
+    # Puts a hard trust prompt on screen, then reports a repairable result:
+    # the repair delivery must refuse and stop the run with evidence.
+    path.write_text(
+        _STDIN_RAW_PREAMBLE
+        + textwrap.dedent(
+            """
+            print("Do you trust the files in this folder?", flush=True)
+            time.sleep(0.5)
+            write_failing_validation_result()
+            time.sleep(30)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_wrong_slice_id_harness(path):
+    # Reports a result for a different slice: a terminal integrity breach that
+    # must stop immediately with no repair round.
+    path.write_text(
+        textwrap.dedent(
+            """
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            artifact = Path(os.environ["MC_SLICE_ARTIFACT_DIR"])
+            (artifact / "orchestrator-result.json").write_text(json.dumps({
+                "schema_version": 1,
+                "slice_id": "Slice 99",
+                "status": "pass",
+                "summary": "worked the wrong slice",
+                "changed_files": [],
+                "validation": [{"command": "toy validation", "result": "pass", "notes": ""}],
+                "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                "commit": {"requested": False, "created": False, "hash": None},
+                "next_action": "",
+                "blockers": [],
+            }), encoding="utf-8")
+            time.sleep(5)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class MasterControllerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1843,12 +2041,28 @@ Continue later.
         self.assertEqual(state["status"], "partial")
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
-        self.assertTrue(((self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "pane-capture.txt").exists())
-        self.assertTrue(((self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "pane-capture-live-latest.txt").exists())
-        activity_path = (self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001" / "activity-attempt-1.jsonl"
+        slice_dir = (self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001"
+        self.assertTrue((slice_dir / "pane-capture.txt").exists())
+        self.assertTrue((slice_dir / "pane-capture-live-latest.txt").exists())
+        activity_path = slice_dir / "activity-attempt-1.jsonl"
         self.assertTrue(activity_path.exists())
         activity = json.loads(activity_path.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(set(activity), {"active", "checked_at", "running"})
+        # First-attempt-pass guardrail: exactly one session, no repair
+        # artifacts, and the pre-repair-loop slice-entry shape.
+        self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
+        self.assertFalse((slice_dir / "repair-prompt.md").exists())
+        self.assertFalse((slice_dir / "repair-prompt-repair-1.md").exists())
+        self.assertFalse((slice_dir / "orchestrator-result-repair-1.json").exists())
+        self.assertFalse((slice_dir / "pane-capture-repair-1.txt").exists())
+        self.assertEqual(
+            set(state["slices"][0]),
+            {
+                "slice_id", "title", "status", "started_at", "completed_at", "artifact_dir",
+                "before_head", "changed_files", "validation", "drift_audit", "code_review",
+                "commit", "next_action", "blockers", "gate_reason", "worker_tools",
+            },
+        )
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_model_supervised_start_wait_finalize_records_pass(self):
@@ -2268,6 +2482,195 @@ Continue later.
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertTrue((run_dir / "slices" / "slice-001" / "activity-attempt-2.jsonl").exists())
+        # The dead-session relaunch consumed one repair round but was not a
+        # circuit-breaker step: the breaker state stays untouched.
+        self.assertEqual(state["slices"][0]["repair"]["round"], 1)
+        self.assertEqual(state["slices"][0]["repair"]["last_signature"], "")
+        self.assertEqual(state["slices"][0]["repair"]["session_generation"], 2)
+
+    def _run_next_args(self, harness, timeout_seconds=20):
+        return argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=0.1,
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+        )
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_repairs_in_session_without_new_session(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "in_session_repair.py"
+        write_in_session_repair_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness)), 0)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        slice_dir = run_dir / "slices" / "slice-001"
+        self.assertEqual(state["slices"][0]["status"], "pass")
+        # One repair round, one session: no attempt-2 artifacts.
+        self.assertEqual(state["slices"][0]["repair"], {
+            "round": 1,
+            "last_signature": "validation",
+            "signature_streak": 1,
+            "session_generation": 1,
+        })
+        self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
+        # The stale failing result was archived, not re-read.
+        archived = json.loads((slice_dir / "orchestrator-result-repair-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(archived["validation"], [])
+        self.assertTrue((slice_dir / "repair-prompt-repair-1.md").exists())
+        self.assertTrue((slice_dir / "pane-capture-repair-1.txt").exists())
+        final = json.loads((slice_dir / "orchestrator-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(final["changed_files"], ["README.md"])
+        events = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        repair_events = [event for event in events if event["kind"] == "repair"]
+        self.assertEqual([event["mode"] for event in repair_events], ["in-session"])
+        self.assertEqual(repair_events[0]["signature"], "validation")
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_circuit_breaker_escalates_then_stops(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "always_failing_validation.py"
+        write_always_failing_validation_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness)), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        slice_dir = run_dir / "slices" / "slice-001"
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("circuit breaker", state["stop_reason"])
+        self.assertIn("validation", state["stop_reason"])
+        # Round 1 was an in-session nudge, round 2 a fresh-session escalation,
+        # and the third consecutive failure tripped the breaker without
+        # consuming a round. Per-round evidence is preserved separately.
+        self.assertEqual(state["slices"][0]["repair"]["round"], 2)
+        self.assertEqual(state["slices"][0]["repair"]["signature_streak"], 2)
+        self.assertEqual(state["slices"][0]["repair"]["session_generation"], 2)
+        self.assertTrue((slice_dir / "activity-attempt-2.jsonl").exists())
+        # Every per-round artifact family survives across rounds.
+        for round_number in (1, 2):
+            self.assertTrue((slice_dir / f"orchestrator-result-repair-{round_number}.json").exists())
+            self.assertTrue((slice_dir / f"pane-capture-repair-{round_number}.txt").exists())
+            self.assertTrue((slice_dir / f"git-status-repair-{round_number}.txt").exists())
+        self.assertTrue((slice_dir / "repair-prompt-repair-1.md").exists())
+        self.assertFalse((slice_dir / "orchestrator-result-repair-3.json").exists())
+        events = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        repair_events = [event for event in events if event["kind"] == "repair"]
+        self.assertEqual([event["mode"] for event in repair_events], ["in-session", "fresh-session"])
+
+    def test_repair_delivery_message_is_single_line_pointer(self):
+        # send_literal types keystrokes into a live TUI, where a newline can
+        # submit a partial message: the in-session delivery must stay one line
+        # and point at the full rendered prompt on disk.
+        plan_slice = mc.parse_plan(self.plan)[0]
+        prompt_path = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001" / "repair-prompt-repair-1.md"
+        message = mc_runner._repair_delivery_message(plan_slice, prompt_path)
+        self.assertNotIn("\n", message)
+        self.assertIn("NOT accepted", message)
+        self.assertIn("Slice 1", message)
+        self.assertIn(str(prompt_path), message)
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_default_budget_exhausts_across_alternating_signatures(self):
+        # Alternating signatures never trip the same-signature circuit
+        # breaker, so the default budget (3) is the bound that ends the run.
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "alternating_failures.py"
+        write_alternating_failure_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness, timeout_seconds=30)), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("repair budget exhausted", state["stop_reason"])
+        self.assertEqual(state["slices"][0]["repair"]["round"], 3)
+        self.assertEqual(state["slices"][0]["repair"]["session_generation"], 1)
+        events = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        repair_events = [event for event in events if event["kind"] == "repair"]
+        self.assertEqual([event["mode"] for event in repair_events], ["in-session"] * 3)
+        self.assertEqual(
+            [event["signature"] for event in repair_events],
+            ["validation", "review", "validation"],
+        )
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_stops_with_evidence_when_repair_delivery_hits_hard_prompt(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "hard_prompt_at_repair.py"
+        write_hard_prompt_at_repair_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness)), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        slice_dir = run_dir / "slices" / "slice-001"
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("repair prompt could not be delivered", state["stop_reason"])
+        self.assertIn("hard prompt", state["stop_reason"])
+        self.assertTrue((slice_dir / "pane-capture-repair-refused-1.txt").exists())
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_repair_budget_exhaustion_blocks(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "in_session_repair.py"
+        write_in_session_repair_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        state = json.loads(run_json.read_text(encoding="utf-8"))
+        self.assertEqual(state["policy"]["max_repair_attempts"], 3)
+        state["policy"]["max_repair_attempts"] = 0
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness)), 2)
+        state = json.loads(run_json.read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("repair budget exhausted", state["stop_reason"])
+        slice_dir = (self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001"
+        self.assertFalse((slice_dir / "repair-prompt-repair-1.md").exists())
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_integrity_gate_stops_immediately_without_repair(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "wrong_slice_id.py"
+        write_wrong_slice_id_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(self._run_next_args(harness)), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        slice_dir = run_dir / "slices" / "slice-001"
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("slice_id does not match", state["stop_reason"])
+        self.assertNotIn("repair", state["slices"][0])
+        self.assertFalse((slice_dir / "repair-prompt-repair-1.md").exists())
+        self.assertFalse((slice_dir / "orchestrator-result-repair-1.json").exists())
+        self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
 
     def test_run_remaining_stops_on_approval_needed_second_slice(self):
         write_plan(self.plan)

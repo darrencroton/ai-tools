@@ -27,7 +27,7 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
   "policy": {
     "dirty_state": "clean-required",
     "approval_gated_slices": "stop",
-    "max_repair_attempts": 1,
+    "max_repair_attempts": 3,
     "commit_required": true
   },
   "plan": {
@@ -45,6 +45,12 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "before_head": "<commit HEAD immediately before this slice attempt started>",
     "orchestrator_session_id": "<optional Claude session id for transcript capture>",
     "worker_tools": ["<tool names required for this slice attempt, empty if none>"],
+    "repair": {
+      "round": 0,
+      "last_signature": "",
+      "signature_streak": 0,
+      "session_generation": 1
+    },
     "pause": null
   },
   "supervision": {
@@ -199,6 +205,16 @@ Hard-stop hints are deterministic guards, not just advice. `send`, `pause-until`
 
 `current_slice.orchestrator_session_id` is optional and records the launched Claude session id when MC composed one. `finalize-slice` and `stop-with-evidence` use it to capture `orchestrator-transcript.jsonl` without relying only on pane text.
 
+`current_slice.repair` tracks the self-correcting repair loop for the active slice:
+
+- `round`: repairable gate failures handled so far (in-session nudge, fresh-session escalation, or dead-session relaunch). The repair budget (`policy.max_repair_attempts`, default 3) is enforced from this persisted counter — never from counting appended slice entries, because in-session repairs deliberately append none.
+- `last_signature` / `signature_streak`: the signature-keyed circuit breaker. The first failure of a signature earns an in-session nudge into the live orchestrator session; the same signature failing again earns exactly one fresh-session retry; a third consecutive failure is terminal regardless of remaining budget. A dead-session relaunch consumes a round but leaves the breaker untouched.
+- `session_generation`: increments only when a fresh tmux session is launched; the session name keys on it, so in-session repair rounds keep one live session.
+
+Every repair is re-verified by the complete, unrelaxed gate against the slice starting commit, so a `repairable` classification can only grant another chance to satisfy the identical gate — it can never accept a bad slice. Repairable signatures are `validation`, `drift`, `review`, `worker-evidence`, `unauthorized-files` (restore-only), `changed-files-mismatch`, `result-malformed`, `commit-missing`, `dirty-worktree`, and `orchestrator-repairable`. Terminal `needs-human` signatures are `integrity-head` and `slice-id-mismatch` — integrity/trust breaches are never steered, because continuing to reason from a context that already holds a false belief about reality is itself the risk. The `integrity-head` gate validates HEAD advance and descent from the slice starting commit on git evidence alone, before any comparison with the self-reported hash, so a truthful report of a reset-to-unrelated HEAD still fails. A missing `orchestrator-result.json` stays terminal `blocked` (a dead or unresponsive session is a runner condition, not a steerable content defect).
+
+Readers must tolerate a missing `repair` key (runs created before the repair loop) by defaulting to round 0; `normalize_run_state` deliberately does not backfill it.
+
 `current_slice.pause` is either `null` or:
 
 ```json
@@ -240,13 +256,23 @@ Runtime slices append entries to `slices`:
   "next_action": "",
   "blockers": [],
   "gate_reason": "all gates passed",
-  "worker_tools": ["<tool names required for this slice attempt, empty if none>"]
+  "worker_tools": ["<tool names required for this slice attempt, empty if none>"],
+  "repair": {
+    "round": 1,
+    "last_signature": "validation",
+    "signature_streak": 1,
+    "session_generation": 1
+  }
 }
 ```
+
+`repair` is present only when the slice actually consumed repair rounds and records the final repair-loop state for the attempt that produced this entry; a slice accepted on its first attempt (and every entry written before the repair loop existed) keeps the exact pre-repair-loop entry shape without it.
 
 Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
 Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe` or `wait` has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+
+Repair rounds add per-round artifacts keyed on the round number, so evidence from rounds sharing one session is never overwritten: `orchestrator-result-repair-<round>.json` (the failing result, archived before deletion so the re-poll waits for a genuinely new result), `pane-capture-repair-<round>.txt`, `git-status-repair-<round>.txt`, `repair-prompt-repair-<round>.md` (plus `repair-prompt.md` as the latest), `pane-capture-repair-refused-<round>.txt` when repair delivery was refused by a hard prompt on screen, and one `"kind": "repair"` operational event per round recording the signature and delivery mode (`in-session`, `fresh-session`, or `relaunch`).
 
 MC sets these environment variables for every slice harness:
 

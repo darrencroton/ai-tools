@@ -22,6 +22,12 @@ RUN_ACTIVE_STATUSES = {"initialized", "running", "paused", "resuming", "partial"
 RUN_STOP_STATUSES = {"needs-human", "blocked", "failed", "cancelled"}
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_POLL_SECONDS = 2.0
+# Per-slice repair budget: how many repairable gate failures MC will steer
+# (in-session nudge, fresh-session escalation, or dead-session relaunch)
+# before stopping for a human. Every repair is re-verified by the complete,
+# unrelaxed gate, so a generous budget can waste attempts but never accept a
+# bad slice. Raised from 1 with the self-correcting repair loop.
+DEFAULT_MAX_REPAIR_ATTEMPTS = 3
 OPERATIONAL_EVENTS_FILENAME = "operational-events.jsonl"
 DEFAULT_SUPERVISION: dict[str, Any] = {
     "mode": "deterministic-batch",
