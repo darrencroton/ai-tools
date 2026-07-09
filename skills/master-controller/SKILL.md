@@ -66,7 +66,18 @@ Model-supervised path:
 8. Do not use `run-next` / `run --scope remaining` while a model-supervised slice is live (they refuse when `current_slice` is populated); finish it through wait/send/finalize or stop it explicitly first.
 9. Stop with evidence for weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, approval-gated, ambiguous, or policy-sensitive conditions.
 
-Ask the user only when required information cannot be inferred safely, such as the target repo, plan path, intended branch, whether to run one slice or all remaining slices, or whether an approval-gated slice should proceed. Do not ask the user to hand-compose harness sandbox flags; use MC profiles and preflight instead.
+Ask the user only when required information cannot be inferred safely, such as the target repo, plan path, intended branch, whether to run the next slice or all remaining slices, or whether an approval-gated slice should proceed. Do not ask the user to hand-compose harness sandbox flags; use MC profiles and preflight instead.
+
+Approval-gated slices: when MC stops on an approval-needed slice and the user explicitly approves it, record that approval with `approve --slice "<Slice N>" --reason "<why>"` and re-run. The approval is stored in run state and logged as an operational event; it clears only an exact `yes` approval flag. Never edit the plan's approval flag to get past the gate — that changes the frozen digest and forces a fresh `init`. If a plan genuinely must be revised mid-run, re-`init` with `--assume-complete "<Slice 1,Slice 2>"` naming the slices already completed and committed, so the new run resumes at the right slice instead of re-running finished work.
+
+## Long-Running Command Discipline
+
+MC's blocking commands outlive the tool-call limits of the assistants that drive them (for example a 10-minute shell-tool cap). A foreground `run --scope remaining` (≈30 minutes per slice) or a multi-hour `pause-until` that is killed mid-call leaves run.json stuck at `running` with the tmux harness still editing the repo unsupervised; `status` warns when it detects this (active status, recorded tmux session gone).
+
+- Run `run --scope remaining` and `run-next` in the background (or under `nohup`/a detached shell), then poll `status`/`summarize`.
+- In model-supervised operation, prefer repeated bounded `wait --seconds <n>` calls that fit inside the tool limit (for example 240–540 seconds) over one long wait.
+- For long pauses, prefer scheduling a later re-observe over a single blocking `pause-until` when the controller cannot safely block that long; `pause-until` remains correct when the controlling process genuinely can wait.
+- For C1 runs on subscription harnesses, prefer an MC model on a different provider than the orchestrator harness: if both share one subscription, a usage window stalls the supervisor and the supervised session at the same time.
 
 ## Safety Rules
 
@@ -75,12 +86,12 @@ The safety invariant of the repair loop: MC re-runs the complete gate with unrel
 MC must stop, without attempting a repair, on:
 
 - Missing or ambiguous plan/slice contract.
-- Approval-needed slice without explicit user approval.
+- Approval-needed slice without a recorded operator approval (`approve` command).
 - Dirty starting git state outside configured policy.
 - Integrity/trust breaches: a required commit that did not advance HEAD, a HEAD not descended from the slice starting commit, or a result reported for the wrong slice. These are never steered — continuing to reason from a context that already holds a false belief about reality is itself the risk.
 - Repair budget exhaustion or a signature that keeps failing through the circuit breaker (in-session correction, then one fresh session, then terminal).
 - A hard prompt on screen when a repair would be delivered (the delivery refuses; MC stops with evidence).
-- Harness, tmux, terminal timeout, transcript, or artifact capture failure.
+- Harness or tmux failure, terminal timeout, or missing required result evidence. (Pane/transcript capture failures degrade to recorded placeholder/note files rather than stopping the run; the structured result and git evidence remain the acceptance basis.)
 - Any proposed destructive filesystem action outside the target repo/worktree.
 - Secret exposure, credential prompt, dependency/license change, remote push, release, deploy, or external side effect not explicitly authorized.
 - Weekly, monthly, account, or billing usage caps.
@@ -93,7 +104,9 @@ MC may recover from a rolling 5-hour usage window, temporary service interruptio
 
 MC decisions must not rely only on natural-language transcript interpretation. The orchestrator must produce `orchestrator-result.json`, and MC must verify claims against local evidence.
 
-Trust boundary for audit verdicts: MC recomputes the highest-risk gate itself — the set of changed files against the authorized surface, using segment-aware matching so `*.md` does not cross directory boundaries — and it independently verifies commit ancestry, HEAD advancement, and a clean post-commit worktree. For the drift-audit and code-review gates, MC verifies the reported verdict string plus the existence of a non-empty artifact file inside the run; it does not re-derive those verdicts from the transcript. A dishonest orchestrator that both writes `"verdict": "PASS"` and fabricates a non-empty artifact is therefore outside what MC detects, by design. The mitigation is that the file-level authorization gate — the change most likely to cause real harm — is always MC's own computation, never the orchestrator's claim.
+Trust boundary for audit verdicts: MC recomputes the highest-risk gate itself — the set of changed files against the authorized surface, using segment-aware matching so `*.md` does not cross directory boundaries — and it independently verifies commit ancestry, HEAD advancement, and a clean post-commit worktree. For the drift-audit, code-review, and validation gates, MC verifies the reported verdict/result fields plus the existence of a non-empty artifact file inside the run; it does not re-derive those verdicts from the transcript and it does not re-run validation commands. A dishonest orchestrator that both writes passing fields and fabricates non-empty artifacts is therefore outside what MC detects, by design. The mitigation is that the file-level authorization gate — the change most likely to cause real harm — is always MC's own computation, never the orchestrator's claim. Worker delegation is verified mechanically one step further: a required worker must appear in `worker_jobs.py`'s own manifest/status artifacts with a matching executable name **and** a successful completion (state `completed`, returncode 0) — launch alone, narration alone, or a crashed worker does not pass.
+
+Be equally candid about the heuristic stops: the dependency/license, secret/credential, remote-push/deploy, and external-side-effect stop conditions are enforced by pane-marker detection plus the orchestrator prompt's prohibitions, not by mechanical inspection of the diff. A silent dependency edit inside an authorized file surface would pass the file-authorization gate; keeping such files out of authorized surfaces (or approval-gating slices that touch them) is the plan-level control.
 
 ## Relationship To Other Skills
 
@@ -110,6 +123,8 @@ Trust boundary for audit verdicts: MC recomputes the highest-risk gate itself �
 ```bash
 python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name>
 python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name> --branch <branch> --create-branch
+python3 skills/master-controller/scripts/mc.py init --repo <path> --plan <path> --harness <name> --assume-complete "Slice 1,Slice 2" --max-repair-attempts 3
+python3 skills/master-controller/scripts/mc.py approve --repo <path> --slice "Slice 3" --reason <why>
 python3 skills/master-controller/scripts/mc.py profiles
 python3 skills/master-controller/scripts/mc.py preflight --repo <path> --worker-tools <tool[,tool]> --allow-profile-command
 python3 skills/master-controller/scripts/mc.py status --repo <path>

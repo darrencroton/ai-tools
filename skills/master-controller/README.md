@@ -54,7 +54,27 @@ python3 skills/master-controller/scripts/mc.py init \
   --create-branch
 ```
 
-Check state:
+Initialize while adopting slices the operator attests were already completed and committed under a previous run (for example after a plan revision forced a fresh init), and/or with an explicit repair budget:
+
+```bash
+python3 skills/master-controller/scripts/mc.py init \
+  --repo /path/to/repo \
+  --plan /path/to/plan.md \
+  --harness codex \
+  --assume-complete "Slice 1,Slice 2" \
+  --max-repair-attempts 3
+```
+
+Record operator approval for an approval-gated slice so the run can proceed without editing the frozen plan:
+
+```bash
+python3 skills/master-controller/scripts/mc.py approve \
+  --repo /path/to/repo \
+  --slice "Slice 3" \
+  --reason "risk reviewed with operator"
+```
+
+Check state (`status` also warns when an active run's tmux session has vanished — the signature of a controlling command killed mid-run):
 
 ```bash
 python3 skills/master-controller/scripts/mc.py status --repo /path/to/repo
@@ -179,32 +199,12 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 ## Default MC Execution Flow
 
-When a user provides a complete implementation plan and asks MC to implement it, the MC should not need a bespoke launch prompt. Choose the operating style first:
+`SKILL.md` is the source of truth for the default operating path (this README previously duplicated it and the two copies drifted). In short: choose **model-supervised MC** when live operational handling matters (usage/session limits, transient interruptions) and **deterministic batch MC** when a conservative fail-closed run is enough; follow the step sequences in `SKILL.md` → "Default Operating Path". Do not ask users to hand-compose harness sandbox, model, or effort flags — use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command`.
 
-- Use **model-supervised MC** when live operational handling matters, such as usage/session limits or temporary service interruptions.
-- Use **deterministic batch MC** when a conservative fail-closed run is enough.
+Two operational rules worth repeating here because they bite in practice (details in `SKILL.md` → "Long-Running Command Discipline"):
 
-Current deterministic batch sequence:
-
-1. Resolve the target repo, plan path, branch, harness, and worker tools from the user request and plan. Default harness is `codex`; worker tools are omitted unless the plan or user requires them.
-2. Initialize a run with `init` if needed, or reuse `.ai-mc/current` only after checking it points at the same repo and plan. If the branch is explicitly authorized and not already current, use `init --branch <name>`; add `--create-branch` only when the operator has authorized branch creation.
-3. Run `preflight --allow-profile-command`, adding `--worker-tools <tool[,tool]>` when workers are required.
-4. Run `run-next --dry-run` to verify the next eligible slice and authorized files.
-5. Run `run-next` for one requested slice, or `run --scope remaining` when the user asked MC to execute the remaining plan and batch operation is appropriate.
-6. Run `summarize`, inspect `run.json`, inspect slice artifacts, and check git status before reporting.
-
-Do not ask users to hand-compose harness sandbox, model, or effort flags. Use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command` so MC chooses the tested launch path and renders worker guidance from tool capabilities plus run requirements.
-
-Model-supervised sequence:
-
-1. Initialize or reuse the run, preflight the harness, and dry-run the next slice.
-2. Start the next eligible slice and return control to the MC model.
-3. Observe live pane/log/json/git evidence repeatedly.
-4. Wait, pause, send a continuation prompt, finalize, or stop based on bounded operational judgment.
-5. Finalize only through deterministic gates after `orchestrator-result.json` appears.
-6. Advance to the next eligible slice only after validation, authorization, review, commit, and clean-worktree evidence passes.
-
-Rolling 5-hour usage windows are recoverable operational pauses when the reset time or duration is clear, the harness process is still alive, no hard-stop prompt is visible, and the pause stays inside configured budgets. Weekly, monthly, account, billing, credential, trust, permission, dependency/license, remote-side-effect, destructive-action, and ambiguous conditions stop for the user with evidence. If a rolling-limit message appears after the harness process exits without a structured result, MC must restart only from a clean authorized state or stop for the user.
+- MC's blocking commands outlive assistant tool-call limits. Run `run`/`run-next` in the background and poll `status`; in model-supervised mode use repeated bounded `wait` calls, not one long wait.
+- For model-supervised runs on subscription harnesses, put the MC model on a different provider than the orchestrator harness so one usage window cannot stall both.
 
 `observe` and `wait` expose `operational_hints` in their JSON output. These hints summarize common pane/transcript evidence such as rolling usage limits, weekly/monthly/account limits, service unavailable messages, network transients, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result. Ordinary hints are evidence for the MC model, not commands. Hard-stop hints are deterministic guards: `send`, `pause-until`, and wait/retry/resume paths refuse unattended continuation when weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect evidence is present.
 
@@ -278,6 +278,8 @@ MC expects implementation-plan slice sections with these headings:
 - `### Rollback Path`
 
 The parser fails closed when a required section is missing, when no files are listed under `Files allowed to change`, or when `Approval needed before implementation` is anything other than an exact `no` (a prefix like "not yet decided" or "none" is treated as unresolved, not as "no", and stops the run).
+
+An explicit `yes` approval flag can be cleared at runtime with `approve --slice "<Slice N>" --reason "<why>"`, which records the operator's approval in run state and the operational event log — the plan file itself stays frozen. A missing or unclear flag cannot be approved away; that is a planning defect to fix in the plan (which then requires a fresh `init`, using `--assume-complete` to adopt slices already completed under the previous run).
 
 Authorized file entries are matched with segment-aware globbing: a plain path matches exactly, a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
 

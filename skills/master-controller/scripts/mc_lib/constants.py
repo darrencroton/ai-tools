@@ -16,7 +16,11 @@ REQUIRED_SECTIONS = (
     "Validation Plan",
     "Rollback Path",
 )
-COMPLETED_SLICE_STATUSES = {"pass", "committed", "complete"}
+# "assumed-complete" is written only by `init --assume-complete`: an operator
+# attestation that a slice was already completed (and committed) before this
+# run existed, e.g. under a previous run whose plan was edited to clear an
+# approval gate. MC never assigns it from gate verification.
+COMPLETED_SLICE_STATUSES = {"pass", "committed", "complete", "assumed-complete"}
 ORCHESTRATOR_STATUSES = {"pass", "repairable", "needs-human", "fail", "blocked"}
 RUN_ACTIVE_STATUSES = {"initialized", "running", "paused", "resuming", "partial"}
 RUN_STOP_STATUSES = {"needs-human", "blocked", "failed", "cancelled"}
@@ -122,7 +126,8 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
             "Which role (orchestrator, senior worker, junior worker) fits a given task is a per-run operator/model "
             "decision based on the configured Copilot model's demonstrated capability, not a fixed property of "
             "this profile — see harness-adapter-contract.md and ai-orchestrator's role definitions.",
-            "Use a per-slice COPILOT_HOME for sandboxed session state.",
+            "When used as a worker (not orchestrator), gets a per-slice COPILOT_HOME for sandboxed session state; "
+            "as orchestrator it keeps the operator's real ~/.copilot config.",
             "Coverage gap: only the directory-trust prompt has been directly observed; other Copilot prompt classes "
             "(credential, permission-denial, external side effect) rely on the same generic keyword markers used "
             "for every harness and have not been individually triggered and confirmed.",

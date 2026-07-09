@@ -182,14 +182,12 @@ def option_values(command: list[str], flags: set[str]) -> list[str]:
                 values.append(command[idx + 1])
             idx += 2
             continue
-        matched = False
         for flag in flags:
             prefix = f"{flag}="
             if arg.startswith(prefix):
                 values.append(arg[len(prefix) :])
-                matched = True
                 break
-        idx += 1 if matched else 1
+        idx += 1
     return values
 
 

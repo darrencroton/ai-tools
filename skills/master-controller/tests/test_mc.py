@@ -650,7 +650,7 @@ class MasterControllerTests(unittest.TestCase):
         slices = mc.parse_plan(self.plan)
         runnable, reasons = mc.eligibility(slices[0])
         self.assertFalse(runnable)
-        self.assertIn("slice is approval-needed", reasons)
+        self.assertTrue(any(reason.startswith("slice is approval-needed") for reason in reasons), reasons)
 
     def test_missing_authorized_surface_blocks(self):
         write_plan(self.plan, include_authorized=False)
@@ -933,7 +933,10 @@ Continue later.
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
         command = adapter.build_shell_command(Path("/tmp/artifacts"), Path("/tmp/run.json"), self.plan, plan_slice)
         self.assertIn("AI_ORCHESTRATOR_ARTIFACT_ROOT=/tmp/artifacts/worker-runs", command)
-        self.assertIn("COPILOT_HOME=/tmp/artifacts/copilot-home", command)
+        # Tool homes are redirected only for that tool as a worker; with no
+        # worker tools configured no home redirect may leak into the launch.
+        self.assertNotIn("COPILOT_HOME=", command)
+        self.assertNotIn("CODEX_HOME=", command)
         self.assertIn("MC_RESULT_SCHEMA_PATH=", command)
         self.assertIn("MC_SLICE_ARTIFACT_DIR=/tmp/artifacts", command)
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
@@ -3637,6 +3640,267 @@ Continue later.
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["stop_reason"], "interrupted by user")
         self.assertIsNone(state["current_slice"])
+
+    # --- Approval-gated slices (approve / --assume-complete) --------------
+
+    def test_approve_command_clears_explicit_yes_gate(self):
+        write_plan(self.plan, approval="yes")
+        self.prepare_committed_repo()
+        state = self.init_run()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        runnable, reasons = mc.eligibility(plan_slice, mc.approved_slice_ids(state))
+        self.assertFalse(runnable)
+        self.assertTrue(any("approve command" in reason for reason in reasons))
+
+        approve_args = argparse.Namespace(repo=str(self.repo), run="current", slice="Slice 1", reason="risk reviewed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.approve_slice(approve_args), 0)
+
+        updated = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertIn("Slice 1", updated["approvals"])
+        self.assertEqual(updated["approvals"]["Slice 1"]["reason"], "risk reviewed")
+        runnable, reasons = mc.eligibility(plan_slice, mc.approved_slice_ids(updated))
+        self.assertTrue(runnable, reasons)
+        events_path = self.repo / updated["operational_events_path"]
+        records = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(record.get("kind") == "approval" and record.get("slice_id") == "Slice 1" for record in records))
+
+        dry_args = argparse.Namespace(repo=str(self.repo), run="current", dry_run=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(dry_args), 0)
+
+    def test_approve_rejects_non_gated_slice(self):
+        self.prepare_committed_repo()
+        self.init_run()
+        approve_args = argparse.Namespace(repo=str(self.repo), run="current", slice="Slice 1", reason="")
+        with self.assertRaisesRegex(mc.McError, "not approval-gated"):
+            mc.approve_slice(approve_args)
+
+    def test_approval_does_not_clear_unclear_flag(self):
+        write_plan(self.plan, approval="not yet decided")
+        plan_slice = mc.parse_plan(self.plan)[0]
+        runnable, reasons = mc.eligibility(plan_slice, {"Slice 1"})
+        self.assertFalse(runnable)
+        self.assertTrue(any("missing or unclear" in reason for reason in reasons))
+
+    def test_init_assume_complete_adopts_prior_slices(self):
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            assume_complete="Slice 1",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(state["slices"]), 1)
+        entry = state["slices"][0]
+        self.assertEqual(entry["slice_id"], "Slice 1")
+        self.assertEqual(entry["status"], "assumed-complete")
+        self.assertIn("operator attested", entry["gate_reason"])
+        candidate = mc.next_slice(mc.parse_plan(self.plan), state)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.slice_id, "Slice 2")
+
+    def test_init_assume_complete_rejects_unknown_slice(self):
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            assume_complete="Slice 99",
+        )
+        with self.assertRaisesRegex(mc.McError, "not in the plan"):
+            mc.init_run(args)
+
+    def test_init_policy_flags_are_recorded(self):
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            plan=str(self.plan),
+            harness="codex",
+            worktree_root=None,
+            max_repair_attempts=1,
+            no_commit_required=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["policy"]["max_repair_attempts"], 1)
+        self.assertFalse(state["policy"]["commit_required"])
+        self.assertEqual(state["approvals"], {})
+
+    # --- Gate hardening (validation artifact, worker success) -------------
+
+    def test_gate_blocks_empty_validation_summary(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "validation-summary.md").write_text("", encoding="utf-8")
+        state = self.init_run()
+        decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo))
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "validation")
+        self.assertIn("missing or empty", decision.reason)
+
+    def test_gate_blocks_worker_that_never_completed_successfully(self):
+        # A required worker that was genuinely launched with the right
+        # executable but crashed (or is still running) proves nothing was
+        # delegated; launch alone must not satisfy the worker-evidence gate.
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text(
+            "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: worker ran.\n",
+            encoding="utf-8",
+        )
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {"01-opencode-readonly-check": {"tool": "opencode", "command": ["opencode", "run"]}}}),
+            encoding="utf-8",
+        )
+        (worker_run / "01-opencode-readonly-check-status.json").write_text(
+            json.dumps({"label": "01-opencode-readonly-check", "state": "failed", "returncode": 1}),
+            encoding="utf-8",
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("never completed successfully", decision.reason)
+
+    # --- Send guards and event-log behavior --------------------------------
+
+    def test_send_rejects_multiline_text(self):
+        self.prepare_committed_repo()
+        self.init_run()
+        args = argparse.Namespace(repo=str(self.repo), run="current", text="line one\nline two", reason="test")
+        with self.assertRaisesRegex(mc.McError, "single line"):
+            mc.send(args)
+
+    def test_send_literal_rejects_multiline_text(self):
+        adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
+        with self.assertRaisesRegex(mc.McError, "single line"):
+            adapter.send_literal("some-session", "line one\nline two")
+
+    def test_event_counter_seeds_from_existing_log(self):
+        state = self.init_run()
+        event_path = self.repo / state["operational_events_path"]
+        event_path.parent.mkdir(parents=True, exist_ok=True)
+        event_path.write_text(
+            "\n".join(json.dumps({"event_id": f"op-{n:04d}", "kind": "observation"}) for n in (1, 2, 3)) + "\n",
+            encoding="utf-8",
+        )
+        record = mc.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+        self.assertEqual(record["event_id"], "op-0004")
+        counter_path = event_path.with_name(event_path.name + ".counter")
+        self.assertEqual(counter_path.read_text(encoding="utf-8").strip(), "4")
+
+    def test_reset_slice_pause_counters(self):
+        state = {"supervision": {"pause_counters": {"consecutive_pauses_current_slice": 2, "cumulative_pause_seconds_run": 900}}}
+        mc.reset_slice_pause_counters(state)
+        self.assertEqual(state["supervision"]["pause_counters"]["consecutive_pauses_current_slice"], 0)
+        # The cumulative per-run budget must survive the per-slice reset.
+        self.assertEqual(state["supervision"]["pause_counters"]["cumulative_pause_seconds_run"], 900)
+
+    # --- Shared repair-decision core ---------------------------------------
+
+    def test_resolve_repair_action_decisions(self):
+        gate = mc.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        repair = mc_state.default_repair_state()
+
+        mode, terminal = mc.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        self.assertEqual((mode, terminal), ("in-session", None))
+        self.assertEqual(repair, {"round": 1, "last_signature": "validation", "signature_streak": 1, "session_generation": 1})
+
+        mode, terminal = mc.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        self.assertEqual((mode, terminal), ("fresh-session", None))
+        self.assertEqual(repair["signature_streak"], 2)
+
+        mode, terminal = mc.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        self.assertEqual(mode, "terminal")
+        self.assertEqual(terminal.status, "needs-human")
+        self.assertIn("circuit breaker", terminal.reason)
+
+    def test_resolve_repair_action_dead_session_relaunch_keeps_breaker(self):
+        gate = mc.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        repair = mc_state.default_repair_state()
+        repair.update(round=1, last_signature="validation", signature_streak=1)
+        mode, terminal = mc.resolve_repair_action(repair, "validation", False, 3, gate, "Slice 1")
+        self.assertEqual((mode, terminal), ("relaunch", None))
+        self.assertEqual(repair["round"], 2)
+        # Breaker state untouched: a dead session is a runner condition.
+        self.assertEqual(repair["signature_streak"], 1)
+
+    def test_resolve_repair_action_budget_exhaustion_is_terminal(self):
+        gate = mc.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        repair = mc_state.default_repair_state()
+        repair["round"] = 3
+        mode, terminal = mc.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        self.assertEqual(mode, "terminal")
+        self.assertEqual(terminal.status, "blocked")
+        self.assertIn("repair budget exhausted", terminal.reason)
+
+    # --- Readiness fallback and orphan detection ---------------------------
+
+    def test_codex_ready_falls_back_to_stable_pane_when_banner_missing(self):
+        # A codex CLI update that rewords its banner must degrade to the
+        # stable-pane heuristic instead of hard-failing every launch.
+        class FakeTime:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += max(float(seconds), 0.01)
+
+        adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
+        with mock.patch.object(mc_tmux_adapter, "time", FakeTime()):
+            with mock.patch.object(adapter, "session_exists", return_value=True):
+                with mock.patch.object(adapter, "_pane_text", return_value="new codex ui without the old banner"):
+                    adapter.wait_until_prompt_ready("some-session")
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for orphan detection test")
+    def test_status_warns_when_active_session_is_gone(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state["status"] = "running"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "Toy",
+            "artifact_dir": f".ai-mc/runs/{state['run_id']}/slices/slice-001",
+            "tmux_session": "mc_no_such_session_xyz",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": None,
+            "pause": None,
+            "worker_tools": [],
+            "repair": mc_state.default_repair_state(),
+        }
+        (run_dir / "run.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.assertEqual(mc.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+        output = buffer.getvalue()
+        self.assertIn("WARNING", output)
+        self.assertIn("mc_no_such_session_xyz", output)
 
     # --- Cross-skill dependency contract ---------------------------------
 

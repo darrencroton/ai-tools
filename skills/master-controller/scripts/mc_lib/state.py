@@ -96,6 +96,29 @@ def operational_events_file(repo: Path, state: dict[str, Any]) -> Path:
     return path if path.is_absolute() else repo / path
 
 
+def _next_event_number(event_path: Path) -> int:
+    """Next event number from a sidecar counter, not by re-counting lines.
+
+    Counting lines on every append is O(n) per event and O(n^2) over a run —
+    a multi-hour pause at a 2s poll cadence produces thousands of events. The
+    counter file lives beside the log and is read/written under the same lock.
+    A run created before the counter existed seeds it by counting once.
+    """
+    counter_path = event_path.with_name(event_path.name + ".counter")
+    if counter_path.exists():
+        try:
+            current = int(counter_path.read_text(encoding="utf-8").strip() or "0")
+        except ValueError:
+            current = 0
+    elif event_path.exists():
+        with event_path.open(encoding="utf-8") as handle:
+            current = sum(1 for _ in handle)
+    else:
+        current = 0
+    counter_path.write_text(f"{current + 1}\n", encoding="utf-8")
+    return current + 1
+
+
 def append_operational_event(repo: Path, state: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     """Append one operational event without rewriting run.json."""
     event_path = operational_events_file(repo, state)
@@ -105,12 +128,7 @@ def append_operational_event(repo: Path, state: dict[str, Any], event: dict[str,
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         record = dict(event)
         if "event_id" not in record:
-            if event_path.exists():
-                with event_path.open(encoding="utf-8") as handle:
-                    next_number = sum(1 for _ in handle) + 1
-            else:
-                next_number = 1
-            record["event_id"] = f"op-{next_number:04d}"
+            record["event_id"] = f"op-{_next_event_number(event_path):04d}"
         record.setdefault("detected_at", utc_now())
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -138,6 +156,25 @@ def update_state_for_stop(run_json: Path, state: dict[str, Any], status_value: s
 
 def idle_status_after_pass(state: dict[str, Any]) -> str:
     return "complete" if len(completed_slice_ids(state)) >= state["plan"]["slice_count"] else "partial"
+
+
+def approved_slice_ids(state: dict[str, Any]) -> set[str]:
+    """Slice ids the operator has explicitly approved with the approve command."""
+    approvals = state.get("approvals")
+    if not isinstance(approvals, dict):
+        return set()
+    return {str(slice_id) for slice_id in approvals}
+
+
+def reset_slice_pause_counters(state: dict[str, Any]) -> None:
+    """Zero the per-slice pause counter when a new slice attempt starts.
+
+    Without this reset the counter named "consecutive pauses per slice" is
+    actually a per-run cap: two pauses anywhere in the run would block every
+    later slice's first pause. The cumulative per-run counter is untouched.
+    """
+    counters = state.setdefault("supervision", {}).setdefault("pause_counters", {})
+    counters["consecutive_pauses_current_slice"] = 0
 
 
 def default_repair_state() -> dict[str, Any]:

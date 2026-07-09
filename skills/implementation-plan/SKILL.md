@@ -91,7 +91,8 @@ Use this shape for every implementation slice:
 
 - Slice headings must be `## Slice <N>: <name>` with unique numbers, and each slice must include all seven `###` sections above verbatim.
 - `Files allowed to change:` must list each authorized path as an indented sub-bullet. Entries are matched segment-aware: a plain path matches exactly, a trailing `/` matches a directory subtree, and `*`/`?` match within one segment — use `**` for a recursive glob (`docs/**/*.md`).
-- `Approval needed before implementation:` must be an exact `no` to run unattended. Anything else (`yes`, `not yet decided`, `none`, blank) stops the run for a human.
+- `Approval needed before implementation:` must be an exact `no` to run unattended. Anything else (`yes`, `not yet decided`, `none`, blank) stops the run for a human. An explicit `yes` can later be cleared at runtime with MC's `approve` command without editing the plan; anything unclear cannot.
+- Slice batches (`Batch A: Slices 1-2`) apply to Mode A and Mode B runs only. `master-controller` (Mode C) executes atomic slices in plan order and ignores batch groupings, so a plan destined for MC should make each slice independently gateable rather than relying on a batch sharing one review.
 
 ## Output Rules
 

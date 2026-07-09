@@ -35,6 +35,7 @@ from .git_ops import (
     write_git_diff,
 )
 from .models import McError
+from .process import run_command
 from .plan import (
     completed_slice_ids,
     duplicate_slice_numbers,
@@ -61,6 +62,7 @@ from .runtime import (
 from .runner import execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
 from .state import (
     append_operational_event,
+    approved_slice_ids,
     idle_status_after_pass,
     load_run,
     normalize_stop_status,
@@ -112,6 +114,25 @@ def init_run(args: argparse.Namespace) -> int:
                     f"intended branch {requested_branch!r} does not exist; "
                     "create it first or rerun init with --create-branch"
                 )
+    # Operator-attested prior completions (see --assume-complete). Validated
+    # against the plan before any state is created so a typo fails the init.
+    assumed_ids: list[str] = []
+    assume_value = getattr(args, "assume_complete", None)
+    if assume_value:
+        known_ids = {plan_slice.slice_id for plan_slice in slices}
+        for raw in str(assume_value).split(","):
+            slice_id = raw.strip()
+            if not slice_id:
+                continue
+            if slice_id not in known_ids:
+                raise McError(f"--assume-complete names a slice not in the plan: {slice_id!r}")
+            if slice_id not in assumed_ids:
+                assumed_ids.append(slice_id)
+
+    max_repair_attempts = getattr(args, "max_repair_attempts", None)
+    if max_repair_attempts is not None and int(max_repair_attempts) < 0:
+        raise McError("--max-repair-attempts must be zero or greater")
+
     rid = run_id()
     mc_dir = repo / ".ai-mc"
     run_dir = mc_dir / "runs" / rid
@@ -151,8 +172,8 @@ def init_run(args: argparse.Namespace) -> int:
         "policy": {
             "dirty_state": "clean-required",
             "approval_gated_slices": "stop",
-            "max_repair_attempts": DEFAULT_MAX_REPAIR_ATTEMPTS,
-            "commit_required": True,
+            "max_repair_attempts": int(max_repair_attempts) if max_repair_attempts is not None else DEFAULT_MAX_REPAIR_ATTEMPTS,
+            "commit_required": not bool(getattr(args, "no_commit_required", False)),
         },
         "plan": {
             "slice_count": len(slices),
@@ -162,7 +183,28 @@ def init_run(args: argparse.Namespace) -> int:
         "current_slice": None,
         "supervision": copy.deepcopy(DEFAULT_SUPERVISION),
         "operational_events_path": relative_artifact_path(repo, run_dir / OPERATIONAL_EVENTS_FILENAME),
-        "slices": [],
+        "approvals": {},
+        "slices": [
+            {
+                "slice_id": slice_id,
+                "title": next(s.title for s in slices if s.slice_id == slice_id),
+                "status": "assumed-complete",
+                "started_at": now,
+                "completed_at": now,
+                "artifact_dir": None,
+                "before_head": None,
+                "changed_files": [],
+                "validation": [],
+                "drift_audit": {"verdict": None, "path": ""},
+                "code_review": {"verdict": None, "path": ""},
+                "commit": {"requested": False, "created": False, "hash": None},
+                "next_action": "",
+                "blockers": [],
+                "gate_reason": "operator attested completion at init (--assume-complete); not verified by MC gates",
+                "worker_tools": [],
+            }
+            for slice_id in assumed_ids
+        ],
         "stop_reason": None,
     }
     write_run(run_dir / "run.json", state)
@@ -174,6 +216,53 @@ def init_run(args: argparse.Namespace) -> int:
     print(f"Initialized MC run: {run_dir}")
     print(f"Branch: {branch}")
     print(f"Slices discovered: {len(slices)}")
+    if assumed_ids:
+        print(f"Assumed complete (operator attested): {', '.join(assumed_ids)}")
+    return 0
+
+
+def approve_slice(args: argparse.Namespace) -> int:
+    """Record explicit operator approval for one approval-gated slice.
+
+    This is the answer to "MC stopped for approval — now what?": without a
+    recorded approval the only alternative was editing the plan's approval
+    flag, which changes the frozen digest and forces a fresh init that forgets
+    completed slices. Approval clears only an explicit `yes` flag; a missing
+    or unclear flag stays blocking because that is a planning defect.
+    """
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    state = load_run(run_dir)
+    plan = resolve_plan(Path(state["plan_path"]))
+    verify_plan_unchanged(state, plan)
+    slices = parse_plan(plan)
+    plan_slice = plan_slice_by_id(slices, args.slice)
+    if plan_slice is None:
+        raise McError(f"slice not found in plan: {args.slice!r}")
+    if plan_slice.approval_needed is not True:
+        raise McError(
+            f"{plan_slice.slice_id} is not approval-gated (Approval needed before implementation is not an exact 'yes'); "
+            "nothing to approve"
+        )
+    reason = args.reason or "approved by operator"
+
+    def record(run_state: dict[str, Any]) -> None:
+        approvals = run_state.setdefault("approvals", {})
+        approvals[plan_slice.slice_id] = {"approved_at": utc_now(), "reason": reason, "approved_by": "operator"}
+
+    updated = update_run_locked(run_dir / "run.json", record)
+    append_operational_event(
+        repo,
+        updated,
+        {
+            "kind": "approval",
+            "status": "recorded",
+            "slice_id": plan_slice.slice_id,
+            "reason": reason,
+            "decided_by": "operator",
+        },
+    )
+    print(f"Recorded operator approval for {plan_slice.slice_id}: {reason}")
     return 0
 
 
@@ -203,6 +292,31 @@ def status(args: argparse.Namespace) -> int:
         pause = current.get("pause") if isinstance(current.get("pause"), dict) else None
         if pause:
             print(f"Paused until: {pause.get('paused_until')} ({pause.get('reason', 'no reason recorded')})")
+        # Orphan detection: a run stuck at an active status whose recorded tmux
+        # session no longer exists usually means the controlling process was
+        # killed mid-command (for example a foreground CLI call that hit the
+        # invoking assistant's tool timeout). Surface it instead of leaving the
+        # operator to infer it from a stale status.
+        session_name = str(current.get("tmux_session") or "")
+        if state.get("status") in {"running", "resuming"} and session_name and shutil.which("tmux"):
+            session_alive = run_command(["tmux", "has-session", "-t", session_name], allow_failure=True).returncode == 0
+            if not session_alive:
+                artifact_value = current.get("artifact_dir")
+                artifact_dir = Path(str(artifact_value)) if artifact_value else None
+                if artifact_dir is not None and not artifact_dir.is_absolute():
+                    artifact_dir = repo / artifact_dir
+                result_path = artifact_dir / "orchestrator-result.json" if artifact_dir else None
+                if result_path is not None and result_path.exists():
+                    print(
+                        f"WARNING: run status is '{state.get('status')}' but tmux session {session_name!r} is gone; "
+                        "a structured result is waiting — run finalize-slice to gate it."
+                    )
+                else:
+                    print(
+                        f"WARNING: run status is '{state.get('status')}' but tmux session {session_name!r} is gone and no "
+                        "structured result exists; the controlling command may have been killed mid-run. "
+                        "Use stop-with-evidence (or stop) to record the interruption, then reconcile or restart."
+                    )
     if state.get("stop_reason"):
         print(f"Stop reason: {state['stop_reason']}")
     return 0
@@ -443,20 +557,38 @@ def observe(args: argparse.Namespace) -> int:
     return 0
 
 
-def send(args: argparse.Namespace) -> int:
-    repo = resolve_repo(Path(args.repo))
-    run_dir = resolve_run_dir(repo, args.run)
+def _guarded_current_observation(
+    args: argparse.Namespace, repo: Path, run_dir: Path, action: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Shared preamble for primitives acting on the live slice session.
+
+    Loads the run, requires a current slice, records one observation, and
+    refuses when a hard prompt or hard-stop hint is visible.
+    """
     state = load_run(run_dir)
     current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
     if not current:
         raise McError("run has no current slice")
-    if state.get("status") not in {"running", "paused", "resuming"}:
-        raise McError(f"run status is not sendable: {state.get('status')}")
     snapshot = record_observation(repo, state, build_observation(args, repo, run_dir, state))
     hard_prompt = snapshot.get("prompt_on_screen", {})
     if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
-        raise McError("refusing to send while hard prompt is visible: " + ", ".join(hard_prompt.get("kinds", [])))
-    _raise_on_hard_stop_hints(snapshot, "send")
+        raise McError(f"refusing to {action} while hard prompt is visible: " + ", ".join(hard_prompt.get("kinds", [])))
+    _raise_on_hard_stop_hints(snapshot, action)
+    return state, current, snapshot
+
+
+def send(args: argparse.Namespace) -> int:
+    repo = resolve_repo(Path(args.repo))
+    run_dir = resolve_run_dir(repo, args.run)
+    if "\n" in args.text or "\r" in args.text:
+        # send_literal would submit at the first newline (literal keystrokes
+        # into a TUI); reject here too so the operator sees the constraint
+        # before an observation is recorded.
+        raise McError("send text must be a single line; write multi-line content to a file and send a one-line pointer")
+    state = load_run(run_dir)
+    if state.get("status") not in {"running", "paused", "resuming"}:
+        raise McError(f"run status is not sendable: {state.get('status')}")
+    state, current, snapshot = _guarded_current_observation(args, repo, run_dir, "send")
     session_name = str(current.get("tmux_session") or "")
     _current_adapter(args, repo, state).send_literal(session_name, args.text)
     event = append_operational_event(
@@ -506,13 +638,47 @@ def start_slice(args: argparse.Namespace) -> int:
     return 0 if result.get("started") else 2
 
 
+def _observation_signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+    """Compact fingerprint of the decision-relevant observation state."""
+    hard_prompt = snapshot.get("prompt_on_screen", {})
+    return (
+        bool(snapshot.get("process", {}).get("running")),
+        bool(snapshot.get("result", {}).get("exists")),
+        tuple(hard_prompt.get("kinds", []) if isinstance(hard_prompt, dict) else ()),
+        tuple(_hard_stop_hint_kinds(snapshot)),
+    )
+
+
+# Floor between recorded observation events while nothing changes. Polling
+# still happens at --poll-seconds for responsiveness; recording every poll
+# flooded operational-events.jsonl (a 6-hour pause at a 2s cadence is ~10k
+# near-identical "observation" events drowning the real signals).
+_OBSERVATION_EVENT_FLOOR_SECONDS = 60.0
+
+
 def _wait_observing(args: argparse.Namespace, repo: Path, run_dir: Path, seconds: float) -> tuple[str, dict[str, Any]]:
     deadline = time.monotonic() + max(0.0, float(seconds))
     final_snapshot: dict[str, Any] = {}
     reason = "timeout"
+    last_recorded_signature: tuple[Any, ...] | None = None
+    last_recorded_at = float("-inf")
     while True:
         state = load_run(run_dir)
-        final_snapshot = record_observation(repo, state, build_observation(args, repo, run_dir, state))
+        final_snapshot = build_observation(args, repo, run_dir, state)
+        signature = _observation_signature(final_snapshot)
+        breaking = (
+            final_snapshot.get("result", {}).get("exists")
+            or not final_snapshot.get("process", {}).get("running")
+            or (isinstance(final_snapshot.get("prompt_on_screen"), dict) and final_snapshot["prompt_on_screen"].get("present"))
+            or bool(_hard_stop_hint_kinds(final_snapshot))
+            or time.monotonic() >= deadline
+        )
+        # Record on change, on the cadence floor, and always on the final
+        # snapshot so the wait's evidence pointer refers to a recorded event.
+        if breaking or signature != last_recorded_signature or time.monotonic() - last_recorded_at >= _OBSERVATION_EVENT_FLOOR_SECONDS:
+            final_snapshot = record_observation(repo, state, final_snapshot)
+            last_recorded_signature = signature
+            last_recorded_at = time.monotonic()
         if final_snapshot.get("result", {}).get("exists"):
             reason = "result-ready"
             break
@@ -555,15 +721,7 @@ def wait(args: argparse.Namespace) -> int:
 def pause_until(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
-    state = load_run(run_dir)
-    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
-    if not current:
-        raise McError("run has no current slice")
-    snapshot = record_observation(repo, state, build_observation(args, repo, run_dir, state))
-    hard_prompt = snapshot.get("prompt_on_screen", {})
-    if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
-        raise McError("refusing to pause while hard prompt is visible: " + ", ".join(hard_prompt.get("kinds", [])))
-    _raise_on_hard_stop_hints(snapshot, "pause")
+    state, current, snapshot = _guarded_current_observation(args, repo, run_dir, "pause")
     try:
         until = parse_iso_datetime(args.until)
     except ValueError as exc:
@@ -740,7 +898,7 @@ def run_next(args: argparse.Namespace) -> int:
         # execute_slice owns the runtime eligibility gate and the stop-state
         # write; run_next only reports for --dry-run.
         return execute_slice(args, repo, state, candidate, run_dir)
-    runnable, reasons = eligibility(candidate)
+    runnable, reasons = eligibility(candidate, approved_slice_ids(state))
     print(f"Next slice: {candidate.slice_id} - {candidate.title}")
     if runnable:
         print("Eligibility: runnable")
@@ -951,7 +1109,7 @@ def preflight(args: argparse.Namespace) -> int:
     candidate = next_slice(slices, state)
     check("remaining slice", candidate is not None, candidate.slice_id if candidate else "none")
     if candidate:
-        runnable, reasons = eligibility(candidate)
+        runnable, reasons = eligibility(candidate, approved_slice_ids(state))
         check("slice eligibility", runnable, "; ".join(reasons) if reasons else candidate.title)
         proposed_artifact_dir = run_dir / "slices" / slice_dir_name(candidate)
         check("run directory writable", os.access(run_dir, os.W_OK), str(run_dir))

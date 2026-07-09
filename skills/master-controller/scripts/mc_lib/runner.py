@@ -24,6 +24,7 @@ from .runtime import (
 )
 from .state import (
     append_operational_event,
+    approved_slice_ids,
     current_slice_state,
     default_repair_state,
     idle_status_after_pass,
@@ -31,6 +32,7 @@ from .state import (
     previous_completed_head,
     relative_artifact_path,
     repair_state,
+    reset_slice_pause_counters,
     slice_entry_from_gate,
     update_state_for_stop,
     write_run,
@@ -73,7 +75,7 @@ def _capture_failure_evidence(
 
 
 def _check_runtime_start_preconditions(repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_json: Path) -> bool:
-    runnable, reasons = eligibility(plan_slice)
+    runnable, reasons = eligibility(plan_slice, approved_slice_ids(state))
     if not runnable:
         update_state_for_stop(run_json, state, "needs-human", "; ".join(reasons))
         print(f"Next slice: {plan_slice.slice_id} - {plan_slice.title}")
@@ -100,6 +102,75 @@ def _check_runtime_start_preconditions(repo: Path, state: dict[str, Any], plan_s
 
 def _attempt_for_slice(state: dict[str, Any], plan_slice: PlanSlice) -> int:
     return 1 + sum(1 for entry in state.get("slices", []) if entry.get("slice_id") == plan_slice.slice_id)
+
+
+def resolve_repair_action(
+    repair: dict[str, Any],
+    signature: str,
+    session_alive: bool,
+    max_repairs: int,
+    gate: GateDecision,
+    slice_id: str,
+) -> tuple[str, GateDecision | None]:
+    """Shared repair-decision core for both execution paths.
+
+    The deterministic-batch loop (execute_slice) and the model-supervised
+    finalize path must make the identical budget / circuit-breaker / mode
+    decision from the same persisted repair state; this is the single copy of
+    that decision so the two paths cannot drift apart.
+
+    Returns ("terminal", terminal_gate) when the repair loop must end, or
+    (mode, None) with mode in {"in-session", "fresh-session", "relaunch"}
+    after updating `repair` in place:
+
+    - budget exhausted -> terminal blocked.
+    - same signature failing a third consecutive time with a live session ->
+      terminal needs-human (in-session nudge, then one fresh session, then a
+      human).
+    - dead session -> "relaunch": consumes a round but is a runner condition,
+      not a circuit-breaker step, so the breaker state is untouched.
+    - first failure of a signature -> "in-session" nudge into the live session.
+    - second consecutive failure of the same signature -> one "fresh-session"
+      escalation, on the theory the session is anchored on a wrong premise.
+    """
+    if repair["round"] >= max_repairs:
+        return "terminal", GateDecision(
+            "blocked",
+            f"repair budget exhausted for {slice_id} "
+            f"({repair['round']}/{max_repairs} repairs used); last gate failure: {gate.reason}",
+            gate.result,
+            gate.actual_changed_files,
+            signature,
+        )
+    streak = int(repair["signature_streak"]) + 1 if signature == repair["last_signature"] else 1
+    if session_alive and streak >= 3:
+        return "terminal", GateDecision(
+            "needs-human",
+            f"circuit breaker: gate signature {signature!r} failed {streak} consecutive times "
+            f"(after an in-session repair and a fresh-session retry); last gate failure: {gate.reason}",
+            gate.result,
+            gate.actual_changed_files,
+            signature,
+        )
+    round_number = int(repair["round"]) + 1
+    if not session_alive:
+        repair["round"] = round_number
+        return "relaunch", None
+    if streak == 1:
+        repair.update(round=round_number, last_signature=signature, signature_streak=1)
+        return "in-session", None
+    repair.update(round=round_number, last_signature=signature, signature_streak=2)
+    return "fresh-session", None
+
+
+def _announce_launch(adapter: TmuxHarnessAdapter, args: argparse.Namespace) -> None:
+    if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
+        print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
+    if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
+        print(
+            f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
+            "(per-action approval is disabled; MC's post-hoc gates become the safety boundary for this run)"
+        )
 
 
 def _reap_stale_sessions(adapter: TmuxHarnessAdapter, run_dir: Path, run_id_value: str) -> list[dict[str, str]]:
@@ -172,13 +243,7 @@ def start_model_supervised_slice(
         configured_worker_tools,
     )
     reaped_stale_sessions = _reap_stale_sessions(adapter, run_dir, str(state["run_id"]))
-    if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
-        print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
-    if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
-        print(
-            f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
-            "(per-action approval is disabled; MC's post-hoc gates become the safety boundary for this run)"
-        )
+    _announce_launch(adapter, args)
 
     started_at = utc_now()
     before_head = git_head(repo)
@@ -202,6 +267,7 @@ def start_model_supervised_slice(
         configured_worker_tools,
     )
     state.setdefault("supervision", {})["mode"] = "model-supervised"
+    reset_slice_pause_counters(state)
     state["stop_reason"] = None
     write_run(run_json, state)
 
@@ -322,43 +388,12 @@ def finalize_model_supervised_slice(
         return finalize_terminal(gate)
 
     signature = gate.signature or "orchestrator-repairable"
-    if repair["round"] >= max_repairs:
-        return finalize_terminal(
-            GateDecision(
-                "blocked",
-                f"repair budget exhausted for {plan_slice.slice_id} "
-                f"({repair['round']}/{max_repairs} repairs used); last gate failure: {gate.reason}",
-                gate.result,
-                gate.actual_changed_files,
-                signature,
-            )
-        )
     session_alive = adapter.session_exists(session_name)
-    streak = int(repair["signature_streak"]) + 1 if signature == repair["last_signature"] else 1
-    if session_alive and streak >= 3:
-        return finalize_terminal(
-            GateDecision(
-                "needs-human",
-                f"circuit breaker: gate signature {signature!r} failed {streak} consecutive times "
-                f"(after an in-session repair and a fresh-session retry); last gate failure: {gate.reason}",
-                gate.result,
-                gate.actual_changed_files,
-                signature,
-            )
-        )
-    round_number = int(repair["round"]) + 1
+    mode, terminal_gate = resolve_repair_action(repair, signature, session_alive, max_repairs, gate, plan_slice.slice_id)
+    if terminal_gate is not None:
+        return finalize_terminal(terminal_gate)
+    round_number = int(repair["round"])
     _record_repair_round_evidence(adapter, session_name, slice_artifact_dir, round_number, after_status)
-    if not session_alive:
-        # Dead before a repair could be delivered: relaunch fresh. Consumes
-        # budget but is not a circuit-breaker step.
-        mode = "relaunch"
-        repair["round"] = round_number
-    elif streak == 1:
-        mode = "in-session"
-        repair.update(round=round_number, last_signature=signature, signature_streak=1)
-    else:
-        mode = "fresh-session"
-        repair.update(round=round_number, last_signature=signature, signature_streak=2)
     append_operational_event(
         repo,
         state,
@@ -570,13 +605,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             configured_worker_tools,
         )
         if generation == 1:
-            if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
-                print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
-            if adapter.allow_unattended_default and not adapter.command_override and adapter.harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
-                print(
-                    f"Using known unattended-safe default for harness {adapter.harness_name!r}: {adapter.command!r} "
-                    "(per-action approval is disabled; MC's post-hoc gates are the safety boundary for this run)"
-                )
+            _announce_launch(adapter, args)
 
         started_at = utc_now()
         before_head = git_head(repo)
@@ -599,6 +628,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
             configured_worker_tools,
             repair,
         )
+        reset_slice_pause_counters(state)
         state["stop_reason"] = None
         write_run(run_json, state)
 
@@ -676,48 +706,15 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                     break
 
                 signature = last_gate.signature or "orchestrator-repairable"
-                if repair["round"] >= max_repairs:
-                    last_gate = GateDecision(
-                        "blocked",
-                        f"repair budget exhausted for {plan_slice.slice_id} "
-                        f"({repair['round']}/{max_repairs} repairs used); last gate failure: {last_gate.reason}",
-                        last_gate.result,
-                        last_gate.actual_changed_files,
-                        signature,
-                    )
-                    break
                 session_alive = adapter.session_exists(session_name)
-                streak = int(repair["signature_streak"]) + 1 if signature == repair["last_signature"] else 1
-                if session_alive and streak >= 3:
-                    # Circuit breaker: an in-session nudge, then a fresh
-                    # session, then the same signature again — terminal
-                    # regardless of remaining budget.
-                    last_gate = GateDecision(
-                        "needs-human",
-                        f"circuit breaker: gate signature {signature!r} failed {streak} consecutive times "
-                        f"(after an in-session repair and a fresh-session retry); last gate failure: {last_gate.reason}",
-                        last_gate.result,
-                        last_gate.actual_changed_files,
-                        signature,
-                    )
+                mode, terminal_gate = resolve_repair_action(
+                    repair, signature, session_alive, max_repairs, last_gate, plan_slice.slice_id
+                )
+                if terminal_gate is not None:
+                    last_gate = terminal_gate
                     break
-                round_number = int(repair["round"]) + 1
+                round_number = int(repair["round"])
                 _record_repair_round_evidence(adapter, session_name, slice_artifact_dir, round_number, after_status)
-                if not session_alive:
-                    # The session died before a repair could be delivered:
-                    # relaunch fresh. Consumes budget but is not a
-                    # circuit-breaker step, so the breaker state is untouched.
-                    mode = "relaunch"
-                    repair["round"] = round_number
-                elif streak == 1:
-                    mode = "in-session"
-                    repair.update(round=round_number, last_signature=signature, signature_streak=1)
-                else:
-                    # Same signature failed again after a nudge: one
-                    # fresh-session escalation, on the theory the session is
-                    # anchored on a wrong premise.
-                    mode = "fresh-session"
-                    repair.update(round=round_number, last_signature=signature, signature_streak=2)
                 state["current_slice"]["repair"] = dict(repair)
                 write_run(run_json, state)
                 append_operational_event(

@@ -185,15 +185,29 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
         runs = []
     any_worker = False
     matched_tool = False
+    matched_success = False
     for run in runs:
         if not isinstance(run, dict):
             continue
         if run.get("workers"):
             any_worker = True
         manifest_workers = object_field(run.get("manifest") or {}, "workers") if isinstance(run.get("manifest"), dict) else {}
-        for entry in manifest_workers.values() if isinstance(manifest_workers, dict) else ():
+        tool_by_label: dict[str, str] = {}
+        for label, entry in (manifest_workers.items() if isinstance(manifest_workers, dict) else ()):
             if isinstance(entry, dict) and str(entry.get("tool", "")).lower() in required:
                 matched_tool = True
+                tool_by_label[str(label)] = str(entry.get("tool", "")).lower()
+        # Launch alone is not enough: a required worker that crashed on start
+        # (or is still running at finalize) proves nothing was delegated. The
+        # status payloads come from worker_jobs.py's own *-status.json files,
+        # so like the tool name they are mechanically derived, not narrated.
+        for status in run.get("workers") or ():
+            if not isinstance(status, dict):
+                continue
+            if str(status.get("label", "")) not in tool_by_label:
+                continue
+            if str(status.get("state", "")).lower() == "completed" and status.get("returncode") == 0:
+                matched_success = True
     if not any_worker:
         return (
             f"required worker tool(s) ({tools_label}) were never launched: a worker_jobs.py run directory was "
@@ -204,6 +218,12 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
             f"required worker tool(s) ({tools_label}) were never actually invoked: worker_jobs.py recorded worker "
             "run(s), but none used an executable matching the required tool name(s) — check for a worker labeled "
             "after the required tool while actually running a different command"
+        )
+    if not matched_success:
+        return (
+            f"required worker tool(s) ({tools_label}) never completed successfully: worker_jobs.py recorded matching "
+            "worker run(s), but none finished with state 'completed' and returncode 0 — a worker that crashed, was "
+            "cancelled, or is still running does not satisfy the worker-evidence gate"
         )
     return None
 
@@ -317,8 +337,10 @@ def verify_gate(
     validation_failure = _validation_status(result.get("validation"))
     if validation_failure:
         return gate_failure("validation", validation_failure, result, changed_evidence)
-    if not (slice_artifact_dir / "validation-summary.md").exists():
-        return gate_failure("validation", "validation-summary.md is missing", result, changed_evidence)
+    # Same bar as the drift/review artifacts: a real, non-empty file inside the
+    # run. A bare .exists() check let an empty placeholder satisfy this gate.
+    if not artifact_exists(repo, slice_artifact_dir, result, "validation", "validation-summary.md"):
+        return gate_failure("validation", "validation-summary.md is missing or empty", result, changed_evidence)
 
     drift_verdict = str(object_field(result, "drift_audit").get("verdict", "")).upper()
     if drift_verdict != "PASS":

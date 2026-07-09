@@ -52,59 +52,11 @@ Use explicit skill calls. Do not rely on the model to guess which workflow appli
 
 The plan outputs a `Next Chat Prompt`. Paste it into a fresh session. Choose which version fits your situation:
 
-**Mode A — Stay in the loop.** You approve before risky slices and before each commit. One slice, a few tightly-coupled slices, or a named batch per chat, then a handoff to the next session:
+**Mode A — Stay in the loop.** You approve before risky slices and before each commit. One slice, a few tightly-coupled slices, or a named batch per chat, then a handoff to the next session.
 
-```md
-Plan file: <path>
-Slices or batch this session: <e.g. Slice 2, Slices 2–3, or Batch A>
+**Mode B — Step away.** The agent runs all remaining slices, gates each one, and comes back with a summary. It stops on any approval-gated slice or unresolvable problem.
 
-Read the full plan file first. If a selected slice or batch receipt is incomplete or the plan state is unclear, stop and tell me before coding.
-
-Work on the current feature branch for this plan; if none exists, create one and tell me the name.
-
-Use ai-orchestrator as the controlling skill. Keep the implementation local; delegate per that skill's guidance when independence or context economy helps — primarily the hostile drift-audit skill, an independent code-review skill pass, and long-running tests.
-
-For each selected slice or batch, in plan order:
-1. Restate the frozen contract (authorized surface + non-goals) from the plan.
-2. If any included slice's Risk Flags mark approval-needed, stop and get my approval before coding.
-3. apply the scoped-implementation skill against the selected contract.
-4. apply the drift-audit skill. Report the authorization gate result before any quality review.
-5. If the gate passes, apply the code-review skill. If it fails, fix the drift and re-audit.
-6. Surface drift and review findings to me, fix them, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
-7. Ask me before committing. On my approval, commit the selected slice or batch with the commit skill.
-
-After the selected slice(s) or batch are committed, use the handoff skill to record state and the next slice or batch to resume from. Do not continue past the selected scope.
-
-Confirm before starting: plan file read, selected slice(s) or batch, branch, and the first slice.
-```
-
-**Mode B — Step away.** The agent runs all remaining slices, gates each one, and comes back with a summary. It stops on any approval-gated slice or unresolvable problem:
-
-```md
-Plan file: <path>
-Scope: all remaining slices, in plan order.
-
-Read the full plan file first. If the plan is incomplete or its state is unclear, stop and report instead of improvising.
-
-Act as the orchestrator per the ai-orchestrator skill. You own the full run — implement, gate, recover, and make the accept/reject call. Delegate to other models for independence and context economy per that skill: at minimum the hostile drift-audit skill and an independent code-review skill pass per slice, plus long-running tests.
-
-Setup: create a new branch for this run, switch to it, and report the name.
-
-For each slice or approved batch, in plan order:
-1. Restate the frozen contract (authorized surface + non-goals).
-2. If any included slice's Risk Flags mark approval-needed, STOP the run and report — do not self-approve a slice the plan gated for a human.
-3. apply the scoped-implementation skill against the selected contract.
-4. apply the drift-audit skill (delegate a hostile audit). Record the authorization gate result.
-5. If the gate fails, fix the drift inside the contract and re-audit. If it can't be fixed inside the contract, STOP and report.
-6. On a passing gate, apply the code-review skill (delegate for independence). Fix findings, then re-run the relevant gate. If consecutive reviews return only minor findings and have clearly converged record residuals in the slice summary and proceed.
-7. When the slice passes validation, the drift-audit gate, and the code-review gate, use the commit skill. This prompt is explicit approval to commit each slice that has cleared all three gates — and only those.
-
-Stop the run early on: an approval-gated slice, a blocker, an unapproved scope change, a gate/validation failure unfixable inside the contract, or context pressure. On any stop, use the handoff skill to record current state and the next slice or batch to resume from.
-
-When all slices are complete, write a final summary: slices committed, gate results per slice, and anything left for me to assess.
-
-Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
-```
+The copyable Mode A and Mode B launcher templates live in [`skills/implementation-plan/SKILL.md`](skills/implementation-plan/SKILL.md) (section "Next Chat Prompt Format") — that file is the single source for them; every generated plan already ends with the right one filled in.
 
 **Mode C — Run through MC.** Use `master-controller` when the plan is complete and you want the Mode A slice-by-slice workflow managed by an outside controller instead of by repeated human prompts. MC keeps durable state, starts each eligible slice in a fresh harness session, verifies the gates from outside that session, commits only slices that pass validation, drift audit, and code review, and stops for you on approval-gated work or anything outside policy.
 
@@ -118,7 +70,7 @@ Mode C1 launcher:
 ```md
 Plan file: <path>
 Target repo: <path>
-Scope: <one slice, next slice, or all remaining slices>
+Scope: <next slice, or all remaining slices>
 Harness: codex unless I specify otherwise. (claude, copilot, and opencode are also validated MC orchestrator harnesses — name one explicitly to use it.)
 Worker tools: <omit unless the plan requires external workers, e.g. copilot or opencode>
 
@@ -146,7 +98,7 @@ Mode C2 deterministic batch launcher:
 ```md
 Plan file: <path>
 Target repo: <path>
-Scope: <one slice, next slice, or all remaining slices>
+Scope: <next slice, or all remaining slices>
 Harness: codex unless I specify otherwise. (claude, copilot, and opencode are also validated MC orchestrator harnesses — name one explicitly to use it.)
 Worker tools: <omit unless the plan requires external workers, e.g. copilot or opencode>
 
@@ -166,6 +118,13 @@ When the requested scope stops or completes, summarize the MC run: slices attemp
 ```
 
 Mode C is the right family when you want the work to keep moving without manually reprompting each slice, but still want the safety boundary held outside the implementing agent. Use C1 when operational judgment matters; use C2 when a conservative batch run is enough. MC is not a planner; create or repair the plan first with `implementation-plan`, then hand the complete plan to MC.
+
+Mode C operational notes:
+
+- MC runs atomic slices only; plan batches (Batch A/B groupings) apply to Modes A and B, not Mode C. MC's scope selector is the next eligible slice or all remaining slices, in plan order.
+- MC's blocking commands outlive assistant tool-call limits: run `run --scope remaining` in the background and poll `status`, and in C1 use repeated bounded `wait` calls rather than one long wait (see `master-controller/SKILL.md` → "Long-Running Command Discipline").
+- For C1 on subscription harnesses, run the MC model on a different provider than the orchestrator harness so one usage window cannot stall the supervisor and the supervised session together.
+- When MC stops on an approval-gated slice and you approve it, record the approval with `mc.py approve --slice "<Slice N>" --reason "<why>"` and rerun — do not edit the plan's approval flag (that breaks the frozen digest). If a plan must genuinely be revised mid-run, re-`init` with `--assume-complete` naming the already-committed slices so the new run resumes in the right place.
 
 ## Setup
 

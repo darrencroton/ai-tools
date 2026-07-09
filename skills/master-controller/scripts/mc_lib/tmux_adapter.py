@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -189,34 +190,22 @@ class TmuxHarnessAdapter:
         # Any other executable (a custom --harness-command, a non-TUI harness)
         # has no interactive readiness handshake to perform.
 
-    def _wait_codex_ready(self, session_name: str) -> None:
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            if not self.session_exists(session_name):
-                raise McError("codex session exited before the prompt could be sent")
-            capture = self._pane_text(session_name)
-            self._raise_on_trust_prompt("codex", capture)
-            if "OpenAI Codex" in capture and "›" in capture:
-                time.sleep(0.5)
-                return
-            time.sleep(0.25)
-        raise McError("codex TUI did not become ready for prompt injection")
-
-    def _wait_claude_ready(self, session_name: str) -> None:
-        # Claude Code has no single stable "ready" banner MC can key on, so
-        # readiness is inferred from the TUI finishing its draw (non-empty pane
-        # unchanged across a short window). A directory-trust dialog is caught
-        # explicitly and fails closed. Reaching the deadline still returns:
-        # send_prompt's settle-and-double-submit is the backstop, and any trust
-        # dialog would have appeared (and been caught) well before then.
-        deadline = time.monotonic() + 20.0
+    def _wait_stable_pane_ready(self, session_name: str, executable: str, deadline: float) -> None:
+        # Readiness inferred from the TUI finishing its draw: a non-empty pane
+        # unchanged across a short window. Used directly for harnesses with no
+        # stable ready banner (Claude Code, Copilot) and as the fallback when a
+        # banner-keyed harness updates its banner text (Codex, OpenCode). A
+        # directory-trust dialog is caught explicitly and fails closed.
+        # Reaching the deadline still returns: send_prompt's
+        # settle-and-double-submit is the backstop, and any trust dialog would
+        # have appeared (and been caught) well before then.
         previous = ""
         stable_since: float | None = None
         while time.monotonic() < deadline:
             if not self.session_exists(session_name):
-                raise McError("claude session exited before the prompt could be sent")
+                raise McError(f"{executable} session exited before the prompt could be sent")
             capture = self._pane_text(session_name)
-            self._raise_on_trust_prompt("claude", capture)
+            self._raise_on_trust_prompt(executable, capture)
             if capture.strip() and capture == previous:
                 if stable_since is None:
                     stable_since = time.monotonic()
@@ -227,49 +216,44 @@ class TmuxHarnessAdapter:
                 stable_since = None
             previous = capture
             time.sleep(0.25)
+
+    def _wait_banner_ready(self, session_name: str, executable: str, is_ready: Callable[[str], bool]) -> None:
+        # Banner-keyed readiness with a stable-pane fallback: banner strings
+        # are version-fragile (a CLI update that rewords its banner must not
+        # turn every launch into a hard failure), so if the banner never
+        # appears, fall back to the same drawn-and-stable heuristic used for
+        # Claude/Copilot instead of raising.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if not self.session_exists(session_name):
+                raise McError(f"{executable} session exited before the prompt could be sent")
+            capture = self._pane_text(session_name)
+            self._raise_on_trust_prompt(executable, capture)
+            if is_ready(capture):
+                time.sleep(0.5)
+                return
+            time.sleep(0.25)
+        self._wait_stable_pane_ready(session_name, executable, time.monotonic() + 10.0)
+
+    def _wait_codex_ready(self, session_name: str) -> None:
+        self._wait_banner_ready(session_name, "codex", lambda capture: "OpenAI Codex" in capture and "›" in capture)
+
+    def _wait_claude_ready(self, session_name: str) -> None:
+        # Claude Code has no single stable "ready" banner MC can key on.
+        self._wait_stable_pane_ready(session_name, "claude", time.monotonic() + 20.0)
 
     def _wait_opencode_ready(self, session_name: str) -> None:
         # Confirmed by reproduction: a freshly launched `opencode --auto`
         # session shows a stable "Ask anything..." composer placeholder while
         # idle. That text disappears once a prompt is in flight, so it is a
         # reliable one-shot ready marker for the first send.
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            if not self.session_exists(session_name):
-                raise McError("opencode session exited before the prompt could be sent")
-            capture = self._pane_text(session_name)
-            self._raise_on_trust_prompt("opencode", capture)
-            if "Ask anything" in capture:
-                time.sleep(0.5)
-                return
-            time.sleep(0.25)
-        raise McError("opencode TUI did not become ready for prompt injection")
+        self._wait_banner_ready(session_name, "opencode", lambda capture: "Ask anything" in capture)
 
     def _wait_copilot_ready(self, session_name: str) -> None:
         # Copilot's footer text changes between states ("autopilot · /
         # commands" before any prompt, "/ commands · ? help" after), so there
         # is no single stable banner string to key on the way codex has.
-        # Readiness is inferred the same way as Claude: the TUI finishing its
-        # draw (non-empty pane unchanged across a short window). The
-        # directory-trust dialog is caught explicitly and fails closed.
-        deadline = time.monotonic() + 20.0
-        previous = ""
-        stable_since: float | None = None
-        while time.monotonic() < deadline:
-            if not self.session_exists(session_name):
-                raise McError("copilot session exited before the prompt could be sent")
-            capture = self._pane_text(session_name)
-            self._raise_on_trust_prompt("copilot", capture)
-            if capture.strip() and capture == previous:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= 1.5:
-                    time.sleep(0.5)
-                    return
-            else:
-                stable_since = None
-            previous = capture
-            time.sleep(0.25)
+        self._wait_stable_pane_ready(session_name, "copilot", time.monotonic() + 20.0)
 
     def send_prompt(self, session_name: str, prompt_path: Path) -> None:
         buffer_name = f"{session_name}_prompt"
@@ -293,6 +277,12 @@ class TmuxHarnessAdapter:
         run_command(["tmux", "send-keys", "-t", session_name, "C-m"], allow_failure=True)
 
     def send_literal(self, session_name: str, text: str) -> None:
+        if "\n" in text or "\r" in text:
+            # Literal keystrokes into a TUI: the first newline would submit a
+            # partial message (the same race send_prompt's double-Enter
+            # discipline exists for). Multi-line content belongs in a file the
+            # session is pointed at, the way repair prompts are delivered.
+            raise McError("send text must be a single line; write multi-line content to a file and send a one-line pointer")
         if not self.session_exists(session_name):
             raise McError(f"tmux session is not running: {session_name}")
         capture = self._pane_text(session_name)

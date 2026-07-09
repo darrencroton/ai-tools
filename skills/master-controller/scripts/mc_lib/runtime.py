@@ -241,7 +241,13 @@ def extract_operational_hints(
             and not conditional_limit_warning
             and not any(h["kind"] == "usage_limit" and h["source"] == source and h["hard_stop"] for h in hints)
         ):
-            reset_at, retry_after, ambiguous = _reset_fields(text, observed_at, max_single_pause_seconds)
+            # Scope reset parsing to a window around the matched limit text.
+            # Scanning the whole pane let an unrelated duration phrase
+            # elsewhere on screen ("completed in 5 minutes") masquerade as the
+            # reset time; the window still covers the adjacent sentence
+            # ("Usage limit reached. Try again in 3 hours.").
+            reset_window = text[max(0, rolling_match.start() - 200): rolling_match.end() + 300]
+            reset_at, retry_after, ambiguous = _reset_fields(reset_window, observed_at, max_single_pause_seconds)
             hard_stop = reset_at is None and retry_after is None
             subtype = "unknown_limit" if hard_stop or ambiguous else "rolling_window"
             if process_running and not result_exists and not hard_stop:
@@ -506,7 +512,6 @@ def slice_environment(
     paths = slice_paths(slice_artifact_dir)
     env = {
         "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
-        "COPILOT_HOME": str(paths["copilot_home"]),
         "MC_RESULT_SCHEMA_PATH": str(result_schema_path()),
         "MC_RUN_JSON_PATH": str(run_json),
         "MC_PLAN_PATH": str(plan_path),
@@ -519,13 +524,16 @@ def slice_environment(
         "TMPDIR": str(paths["tmp_dir"]),
     }
     # Only redirect a tool's own home when that tool is a *worker* for this
-    # run, and never when it is also the orchestrator harness itself. Codex
-    # worker auth is currently portable via auth.json. Claude Code subscription
-    # OAuth is not portable by copying .credentials.json into CLAUDE_CONFIG_DIR,
-    # so MC deliberately leaves Claude workers on the operator's normal config
-    # unless the caller supplied standard Claude auth environment variables.
-    # Copilot is never an MC orchestrator, so COPILOT_HOME above is always safe
-    # to set.
+    # run, and never when it is also the orchestrator harness itself — a
+    # Copilot or Codex orchestrator must keep its real config/session state.
+    # Codex worker auth is currently portable via auth.json. Copilot only needs
+    # a writable isolated dir (its GitHub credential lives outside ~/.copilot).
+    # Claude Code subscription OAuth is not portable by copying
+    # .credentials.json into CLAUDE_CONFIG_DIR, so MC deliberately leaves
+    # Claude workers on the operator's normal config unless the caller supplied
+    # standard Claude auth environment variables.
+    if "copilot" in worker_tools and orchestrator_harness_name != "copilot":
+        env["COPILOT_HOME"] = str(paths["copilot_home"])
     if "codex" in worker_tools and orchestrator_harness_name != "codex":
         env["CODEX_HOME"] = str(paths["codex_home"])
     return env
@@ -536,7 +544,10 @@ def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
         return "No worker tool is configured for this run."
     policies: list[str] = []
     if "copilot" in worker_tools:
-        policies.append("Copilot gets an isolated per-slice COPILOT_HOME for writable session state.")
+        policies.append(
+            "Copilot gets an isolated per-slice COPILOT_HOME for writable session state when Copilot is a worker "
+            "and not the orchestrator."
+        )
     if "codex" in worker_tools:
         policies.append("Codex gets an isolated per-slice CODEX_HOME seeded with auth.json when Codex is a worker and not the orchestrator.")
     if "claude" in worker_tools:

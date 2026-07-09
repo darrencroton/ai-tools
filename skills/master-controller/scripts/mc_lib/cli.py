@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .commands import (
+    approve_slice,
     archive_sensitive,
     finalize_slice,
     init_run,
@@ -73,7 +74,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --branch, create and switch to the branch before initializing when it does not exist",
     )
+    init.add_argument(
+        "--assume-complete",
+        help=(
+            "comma-separated slice ids (e.g. 'Slice 1,Slice 2') the operator attests were already completed and "
+            "committed before this run; recorded as assumed-complete so the run resumes at the next real slice"
+        ),
+    )
+    init.add_argument(
+        "--max-repair-attempts",
+        type=int,
+        help="per-slice repair budget for this run (default 3); 0 disables repair steering entirely",
+    )
+    init.add_argument(
+        "--no-commit-required",
+        action="store_true",
+        help="record policy commit_required=false so slices are gated without requiring a commit",
+    )
     init.set_defaults(func=init_run)
+
+    approve = subparsers.add_parser("approve", help="record operator approval for one approval-gated slice")
+    add_repo_run_args(approve)
+    approve.add_argument("--slice", required=True, help="slice id to approve, e.g. 'Slice 3'")
+    approve.add_argument("--reason", default="", help="approval reason recorded in run state and operational events")
+    approve.set_defaults(func=approve_slice)
 
     for name, func, help_text in (
         ("status", status, "show current MC run state"),

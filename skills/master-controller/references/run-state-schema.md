@@ -73,10 +73,27 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     }
   },
   "operational_events_path": ".ai-mc/runs/20260704T013000Z/operational-events.jsonl",
+  "approvals": {},
   "slices": [],
   "stop_reason": null
 }
 ```
+
+`policy.max_repair_attempts` and `policy.commit_required` are set at `init` (`--max-repair-attempts`, `--no-commit-required`) and default to 3 and true. Supervision pause budgets keep their defaults; editing them by hand in `run.json` before the first slice starts is the supported way to change them for a run.
+
+`approvals` maps an approval-gated slice id to a recorded operator approval:
+
+```json
+{
+  "Slice 3": {
+    "approved_at": "2026-07-04T02:00:00Z",
+    "reason": "risk reviewed with operator",
+    "approved_by": "operator"
+  }
+}
+```
+
+Written only by the `approve` command (which also appends a `"kind": "approval"` operational event). An entry clears exactly one condition: a plan slice whose `Approval needed before implementation` flag is an explicit `yes`. Missing or unclear flags stay blocking regardless of approvals.
 
 Allowed run `status` values:
 
@@ -100,11 +117,21 @@ Allowed run `status` values:
   baseline and skip this check.
 - Slice numbers must be unique; `init` fails closed on a duplicate `## Slice N:`
   because completion tracking keys on the slice id.
-- MC assumes one logical controller for a run, but model-supervised operation
-  may invoke separate commands such as wait, send, finalize, and human stop.
-  Commands that rewrite `run.json` must use a single-writer strategy, such as
-  an advisory lock around read-modify-write. High-frequency observations must
-  be appended to JSONL artifacts instead of repeatedly rewriting `run.json`.
+- A revised plan requires a fresh `init`. When earlier slices were already
+  completed and committed under the previous run, `init --assume-complete
+  "Slice 1,Slice 2"` records operator-attested `assumed-complete` entries so
+  the new run resumes at the next real slice instead of re-running finished
+  work. These entries are attestations, not gate verdicts: MC never assigns
+  the status itself, and the entry's `gate_reason` says so.
+- MC assumes one logical controller for a run. Concurrency control is
+  deliberately partial: the operational-events JSONL and `approve` use
+  advisory locks (`update_run_locked` / the events lock), and `pause-until`
+  locks its counter updates because it overlaps long waits — but
+  `start-slice`, `finalize-slice`, `stop`, and the batch loop rewrite
+  `run.json` unlocked under the one-controller assumption (they also refuse
+  to run while another slice is live). Do not drive one run from two
+  controllers concurrently. High-frequency observations must be appended to
+  JSONL artifacts instead of repeatedly rewriting `run.json`.
 
 ## Supervision State
 
@@ -130,7 +157,7 @@ Existing run files without `supervision` or `operational_events_path` load with 
 
 ## Operational Events
 
-`operational_events_path` points at an append-only JSONL file. Model-supervised primitives append observations, waits, sends, pauses, resumes, retries, hard-stop detections, finalization attempts, and stop-with-evidence records there.
+`operational_events_path` points at an append-only JSONL file. Model-supervised primitives append observations, waits, sends, pauses, resumes, retries, hard-stop detections, approvals, finalization attempts, and stop-with-evidence records there. Event ids come from a sidecar `.counter` file maintained under the same lock (seeded by a one-time line count for runs created before the counter existed). During `wait`/`pause-until` polling, observation events are recorded on decision-relevant change or on a 60-second floor — not on every poll — plus always for the final snapshot, so a multi-hour pause does not flood the log with identical entries.
 
 Example line:
 
@@ -270,7 +297,7 @@ Runtime slices append entries to `slices`:
 
 `repair` is present only when the slice actually consumed repair rounds and records the final repair-loop state for the attempt that produced this entry; a slice accepted on its first attempt (and every entry written before the repair loop existed) keeps the exact pre-repair-loop entry shape without it.
 
-Completed statuses for slice selection are `pass`, `committed`, and `complete`. Any other status is treated as not completed unless a future policy explicitly says otherwise.
+Completed statuses for slice selection are `pass`, `committed`, `complete`, and `assumed-complete` (the last written only by `init --assume-complete` as an operator attestation). Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
 Each slice artifact directory contains the rendered `prompt.md`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe` or `wait` has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
@@ -289,7 +316,7 @@ MC sets these environment variables for every slice harness:
 - `MC_SLICE_TMP_DIR`
 - `TMPDIR`
 - `MC_TOOL_HOME_ROOT`
-- `COPILOT_HOME`
+- `COPILOT_HOME` when Copilot is a required worker and not the orchestrator
 - `CODEX_HOME` when Codex is a required worker and not the orchestrator
 
 MC does not set `CLAUDE_CONFIG_DIR` for Claude workers. Claude Code subscription OAuth is not portable by copying `.credentials.json` into an isolated config directory; use normal Claude Code auth, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN` for unattended isolated auth.
@@ -340,6 +367,6 @@ Allowed orchestrator `status` values:
 
 MC verifies this result against git state, artifacts, validation output, drift audit, code review, and commit state before accepting a slice.
 
-When a run specifies required worker tool(s) (`--worker-tools`), MC additionally requires mechanical evidence that a worker actually ran before it will accept a `pass`: a non-empty `worker-evidence.md` in the slice artifact directory, and a `worker-runs-summary.json` containing at least one worker entry (built only from real `worker_jobs.py` `manifest.json` / `*-status.json` artifacts, so it cannot be satisfied by prose alone). An orchestrator that narrates why it chose not to launch a required worker, or substitutes its own direct checks and calls that "insufficient" evidence, does not satisfy this gate — it fails like any other unmet contract requirement, even if validation, drift audit, and code review all pass. This closes a gap observed in testing: an orchestrator self-declared its own worker evidence "insufficient" per the plan's "stop and report why no worker was available" instruction, but nothing previously stopped it from proceeding through commit anyway. The required worker tool(s) for a slice attempt are persisted at `current_slice.worker_tools` and carried into each slice entry's `worker_tools` field so `finalize-slice` and `reconcile` (separate invocations from the one that started the slice) can recover the requirement without depending on that invocation's own `--worker-tools` flag.
+When a run specifies required worker tool(s) (`--worker-tools`), MC additionally requires mechanical evidence that a worker actually ran — and finished — before it will accept a `pass`: a non-empty `worker-evidence.md` in the slice artifact directory, and a `worker-runs-summary.json` (built only from real `worker_jobs.py` `manifest.json` / `*-status.json` artifacts, so it cannot be satisfied by prose alone) containing at least one worker whose mechanically derived tool name matches a required tool **and** whose status recorded state `completed` with returncode 0. A matching worker that crashed on start, was cancelled, or is still running at finalize does not satisfy the gate. An orchestrator that narrates why it chose not to launch a required worker, or substitutes its own direct checks and calls that "insufficient" evidence, does not satisfy this gate — it fails like any other unmet contract requirement, even if validation, drift audit, and code review all pass. This closes a gap observed in testing: an orchestrator self-declared its own worker evidence "insufficient" per the plan's "stop and report why no worker was available" instruction, but nothing previously stopped it from proceeding through commit anyway. The required worker tool(s) for a slice attempt are persisted at `current_slice.worker_tools` and carried into each slice entry's `worker_tools` field so `finalize-slice` and `reconcile` (separate invocations from the one that started the slice) can recover the requirement without depending on that invocation's own `--worker-tools` flag.
 
 When all authorization, validation, drift, review, changed-file, ancestry, and clean-worktree evidence passes but `commit.hash` is wrong or abbreviated, MC may reconcile that evidence field to the proven current `HEAD`, write `mc-reconciliation.json` / `mc-reconciliation.md`, update `orchestrator-result.json`, and accept the slice. This reconciliation is limited to commit-hash evidence; it must not mask unauthorized files, missing validation, failed audits/reviews, dirty worktrees, or missing commits.

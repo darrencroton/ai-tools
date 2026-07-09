@@ -95,7 +95,7 @@ def next_slice(slices: list[PlanSlice], state: dict[str, Any]) -> PlanSlice | No
     return None
 
 
-def eligibility(plan_slice: PlanSlice) -> tuple[bool, list[str]]:
+def eligibility(plan_slice: PlanSlice, approved_slice_ids: frozenset[str] | set[str] = frozenset()) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     missing = plan_slice.missing_sections
     if missing:
@@ -103,9 +103,11 @@ def eligibility(plan_slice: PlanSlice) -> tuple[bool, list[str]]:
     if not plan_slice.authorized_files:
         reasons.append("authorized surface has no files allowed to change")
     approval = plan_slice.approval_needed
-    if approval is True:
-        reasons.append("slice is approval-needed")
+    if approval is True and plan_slice.slice_id not in approved_slice_ids:
+        reasons.append("slice is approval-needed (record operator approval with the approve command to run it)")
     elif approval is None:
+        # A recorded approval clears only an explicit `yes`. An unclear flag is
+        # a planning defect, not an approval question, so it stays blocking.
         reasons.append("approval-needed risk flag is missing or unclear")
     return not reasons, reasons
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .cli import build_parser, main
 from .commands import (
+    approve_slice,
     archive_sensitive,
     build_observation,
     finalize_slice,
@@ -97,7 +98,7 @@ from .profiles import (
     profile_command,
     resolve_harness_command,
 )
-from .runner import execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
+from .runner import execute_slice, finalize_model_supervised_slice, resolve_repair_action, start_model_supervised_slice
 from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
@@ -125,6 +126,7 @@ from .runtime import (
 )
 from .state import (
     append_operational_event,
+    approved_slice_ids,
     current_slice_state,
     default_operational_events_path,
     idle_status_after_pass,
@@ -133,6 +135,7 @@ from .state import (
     normalize_run_state,
     operational_events_file,
     previous_completed_head,
+    reset_slice_pause_counters,
     resolve_run_dir,
     resolve_run_path,
     run_json_path,
@@ -168,6 +171,8 @@ __all__ = [
     "SCHEMA_VERSION",
     "SENSITIVE_ARTIFACT_NAMES",
     "WORKER_CREDENTIAL_HOMES",
+    "approve_slice",
+    "approved_slice_ids",
     "archive_sensitive",
     "append_operational_event",
     "artifact_exists",
@@ -230,6 +235,8 @@ __all__ = [
     "relative_artifact_path",
     "render_orchestrator_prompt",
     "require_clean_worktree",
+    "reset_slice_pause_counters",
+    "resolve_repair_action",
     "resolve_harness_command",
     "resolve_plan",
     "resolve_repo",
