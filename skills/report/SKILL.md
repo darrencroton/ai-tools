@@ -1,77 +1,69 @@
 ---
 name: report
-description: Create structured engineering reports with consistent scope, evidence, findings, risks, and next actions. Use only when the user explicitly asks for this report skill, a report, a status report, or a final report. For implementation planning, use implementation-plan instead.
+description: Create a concise evidence-backed written synthesis when the user explicitly asks for a report, assessment, investigation summary, comparison memo, status note, or final summary. Do not use for implementation planning, scoped implementation receipts, drift audits, code reviews, handoffs, MC run summaries, or commit messages.
 
 ---
 
 # Report
 
-Use this skill to turn analytical or planning work into a structured report with a clear finish line. Do not write a free-form essay when this skill applies.
+Use this skill only when the useful deliverable is a human-readable synthesis of evidence and judgment. Keep it lean. The report should clarify what was found, what it means, and what should happen next without replacing the narrower workflow skills.
+
+## Relationship To Other Skills
+
+Prefer the more specific skill whenever one applies:
+
+- Use `implementation-plan` for plan-first work, frozen acceptance slices, authorized surfaces, validation plans, and next-chat prompts.
+- Use `scoped-implementation` for implementation receipts after a frozen slice is executed.
+- Use `drift-audit` for authorization gates.
+- Use `code-review` for quality findings and review verdicts.
+- Use `handoff` when the goal is to preserve continuation state for another chat or agent.
+- Use `master-controller` summaries and artifacts for MC run status.
+- Use `commit` for commit messages and staging discipline.
+
+`report` may summarize outputs from those skills after they have done their jobs, but it must not redefine their contracts or invent replacement sections.
 
 ## Workflow
 
-Follow this sequence:
+1. State the report question or decision in one sentence.
+2. Gather enough primary evidence to support the claims.
+3. Decide the lightest useful structure for the user's request.
+4. Write the synthesis with clear separation between facts, interpretation, recommendations, and unknowns.
+5. End with the concrete next action, or state that none is needed.
 
-1. Classify the request into the lightest report mode that fits.
-2. Read [references/common-report-contract.md](references/common-report-contract.md).
-3. Read the matching mode template:
-   - [references/template-investigation.md](references/template-investigation.md)
-   - [references/template-bug-hunt.md](references/template-bug-hunt.md)
-   - [references/template-comparison.md](references/template-comparison.md)
-   - [references/template-final-report.md](references/template-final-report.md)
-   - [references/template-quick-update.md](references/template-quick-update.md)
-4. Gather the evidence required for that mode before writing the report body.
-5. Write the report in the template's section order.
-6. End only after the completion gate for that mode is satisfied.
+## Default Shape
 
-## Mode Selection
+Use only the sections that add value. Rename or omit sections for short status notes.
 
-Choose exactly one primary mode unless the user explicitly asks for a hybrid report.
+```md
+## Summary
 
-If the task spans two modes, choose the mode that matches the primary deliverable and explicitly import the essential sections from the secondary mode. Example: an investigation that ends in a recommended implementation can stay in `investigation` mode while adding the necessary planning sections.
+## Evidence
 
-- `investigation`: codebase exploration, behaviour tracing, execution path analysis, system understanding
-- `bug-hunt`: defect isolation, regressions, incident analysis, root-cause analysis
-- `comparison`: compare implementations, options, branches, libraries, architectures, or observed behaviours
-- `final-report`: close-out summary after work is complete or when the user asks for an assessment
-- `quick-update`: short status report where a full report would be unnecessarily heavy
+## Findings
 
-If the request is "find out how this works," default to `investigation`.
-If the request is "why is this broken," default to `bug-hunt`.
-If the request is "which option is better," default to `comparison`.
-If the request is "summarize what was done," default to `final-report`.
-If the request is "what should we build" or asks for an implementation plan, use `implementation-plan` instead of this skill.
+## Recommendation / Next Action
+
+## Risks / Unknowns
+```
+
+For comparisons, include the decision criteria before the recommendation. For final summaries, include validation performed and residual risks. For status notes, a short `Current State`, `Blockers`, and `Next Action` format is enough.
 
 ## Evidence Standard
-
-Base the report on concrete evidence, not impression.
 
 - Reference the files inspected.
 - Name commands, traces, tests, logs, or documents used.
 - Separate confirmed facts from assumptions.
 - State what was not checked when that affects confidence.
 - Keep conclusions proportional to the evidence available.
-- When synthesizing outputs from multiple workers or contributors, define the judgment criteria before filling interpretation-heavy sections such as `Interpretation`, `Current Understanding`, `Recommended Approach`, or `Decision`.
+- When synthesizing outputs from multiple workers or contributors, define the judgment criteria before making evaluative claims.
 
 ## Output Rules
 
-- Prefer headings and short bullets over long prose blocks.
-- Keep the template's section order stable.
+- Prefer short sections and high-signal bullets over long prose.
 - Use explicit labels such as `Confirmed`, `Assumption`, `Unverified`, and `Blocked` when helpful.
-- Make scope boundaries explicit.
+- Make scope boundaries explicit when they affect interpretation.
 - Make next actions concrete and ordered.
-- Include a completion statement tied to the requested scope.
+- Keep file-output reports in `docs/` only when the user asks for a document or file output.
+- Do not add a completion-status section unless it clarifies why the requested report is done.
 
-Write reports to `docs/` by default only when the user asks for a document or file output. Otherwise, use the report structure directly in the response.
-
-## Completion Gates
-
-Do not conclude early. A report is complete only when its required sections and gate checks are satisfied.
-
-- `investigation`: include the question, evidence trail, current understanding, and remaining unknowns
-- `bug-hunt`: include symptom, impact, reproduction status, root-cause confidence, and next actions
-- `comparison`: define comparison criteria before recommending an option
-- `final-report`: include work completed, validation performed, and residual risks
-- `quick-update`: include current state, what changed, next step, and blockers or "none"
-
-If a required section has no content, state that explicitly instead of omitting it.
+If the report becomes an implementation plan, handoff, drift audit, or code review while writing it, stop and switch to the appropriate skill.

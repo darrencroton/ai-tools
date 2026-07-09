@@ -29,7 +29,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | [`code-simplifier`](skills/code-simplifier/) | Refines working code for clarity and maintainability without changing behaviour. A separate cleanup pass, not part of the default implementation flow. |
 | [`handoff`](skills/handoff/) | Writes a compact handoff file when continuing in another chat. Captures current status, what's left, blockers, and the single best next action. |
 | [`commit`](skills/commit/) | Stages and commits specific files by name, never skips hooks, and writes a message that lists changed files with reasons. Only called after explicit approval. |
-| [`report`](skills/report/) | Produces structured engineering reports for investigations, bug hunts, comparisons, status updates, and final summaries. |
+| [`report`](skills/report/) | Produces concise evidence-backed written synthesis when explicitly requested. Optional; not part of the default implementation gate chain. |
 | [`summarise-paper`](skills/summarise-paper/) | Summarises a science paper from a local PDF or URL into a structured markdown document with accuracy and quote-fidelity checks. |
 
 ## Workflow

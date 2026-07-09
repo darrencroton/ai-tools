@@ -69,7 +69,7 @@ Core local skill map:
 | `code-simplifier` | Explicit separate simplification/refactor pass for working code; not part of the default scoped implementation loop |
 | `handoff` | Preserve task state for another chat or agent, including frozen contract and authorization gate status |
 | `commit` | Only after explicit user approval to commit; prepare/stage/commit with the required message discipline |
-| `report` | Evidence-backed reports, investigations, status updates, and final reports; not implementation planning |
+| `report` | Optional final human-facing synthesis across evidence or worker outputs; not planning, implementation receipts, authorization gates, quality review, handoff, MC summaries, or commit messages |
 | `summarise-paper` | Science paper summaries only when specifically requested |
 | `openai-docs` | Current official OpenAI product/API guidance when OpenAI docs or model/product details are requested |
 | `skill-creator` | Create or update skills, including this orchestration skill |
