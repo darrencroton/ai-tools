@@ -32,7 +32,15 @@ def git_head(repo: Path) -> str | None:
 
 
 def git_status_text(repo: Path) -> str:
-    return git(repo, "status", "--short", "--untracked-files=all")
+    # Deliberately not the generic git() helper: that strips stdout, and
+    # `status --short` output is positional — a leading space on the first
+    # line (" M file", an unstaged modify) is part of the status code, and
+    # stripping it shifted that line's path parse by one character
+    # ("EADME.md"), misreporting the file at every consumer of status text.
+    result = git_result(repo, "status", "--short", "--untracked-files=all")
+    if result.returncode != 0:
+        raise McError(result.stderr.strip() or result.stdout.strip() or "git status failed")
+    return result.stdout
 
 
 def status_path(line: str) -> str:

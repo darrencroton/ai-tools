@@ -900,6 +900,16 @@ Continue later.
         self.assertIn("M  README.md", prompt)
         self.assertNotIn(".ai-mc/scratch.txt", prompt)
 
+    def test_git_status_text_preserves_leading_space_on_first_line(self):
+        # `git status --short` is positional: " M file" (unstaged modify)
+        # starts with a meaningful space. A stripped read shifted the first
+        # line's path parse by one character ("EADME.md").
+        self.prepare_committed_repo()
+        (self.repo / "seed.txt").write_text("modified but unstaged\n", encoding="utf-8")
+        status_text = mc.git_status_text(self.repo)
+        self.assertTrue(status_text.startswith(" M "), repr(status_text.splitlines()[0]))
+        self.assertEqual(mc.status_changed_files(status_text), {"seed.txt"})
+
     def test_repair_prompt_fails_closed_on_unknown_signature(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
@@ -1719,13 +1729,11 @@ Continue later.
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "-m", "Good change")
         after = git(self.repo, "rev-parse", "HEAD")
-        # Staged but uncommitted: status shows "M  README.md" with the status
-        # code in column 0, which survives the git() helper's stdout strip()
-        # (an unstaged " M" first line would lose its leading space and mangle
-        # the parsed path — a pre-existing git_ops parsing quirk outside this
-        # slice's surface).
+        # Unstaged modify: the first status line is " M README.md" with a
+        # leading space that is part of the positional status code. This is
+        # the exact shape a stdout-stripping status read used to mangle into
+        # "EADME.md" (misclassified as an unauthorized file).
         (self.repo / "README.md").write_text("uncommitted follow-up\n", encoding="utf-8")
-        git(self.repo, "add", "README.md")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         state = self.init_run()
