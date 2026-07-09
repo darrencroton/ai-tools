@@ -54,14 +54,14 @@ DEFAULT_SUPERVISION: dict[str, Any] = {
 }
 
 # User-approved exception (explicit choice via AskUserQuestion, this session):
-# the operator may opt in to these two known unattended-safe launch commands
+# the operator may opt in to these known unattended-safe launch commands
 # with --allow-unattended-default. Without that flag, or for any other
 # harness name, MC still fails closed and requires --harness-command. Bare
 # harness names otherwise resolve to an interactive session (see
 # TmuxHarnessAdapter): tmux pastes the prompt and presses enter as if a human
-# were typing, so an unflagged `codex`/`claude` process would still prompt
-# for per-action approval that nothing in this loop can answer, silently
-# deadlocking the run until --timeout-seconds expires.
+# were typing, so an unflagged harness process may prompt for per-action
+# approval that nothing in this loop can answer, silently deadlocking the run
+# until --timeout-seconds expires.
 KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
     "codex": "codex --no-alt-screen -s workspace-write -a never",
     "claude": "claude --permission-mode auto",

@@ -55,7 +55,7 @@ def add_unattended_default_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-unattended-default",
         action="store_true",
-        help="opt in to a known unattended-safe launch command for --harness codex/claude (disables per-action approval; MC's post-hoc gates become the safety boundary)",
+        help="opt in to a known unattended-safe launch command for --harness codex/claude/copilot/opencode (disables per-action approval; MC's post-hoc gates become the safety boundary)",
     )
 
 
