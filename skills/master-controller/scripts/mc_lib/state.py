@@ -144,6 +144,25 @@ def default_repair_state() -> dict[str, Any]:
     return {"round": 0, "last_signature": "", "signature_streak": 0, "session_generation": 1}
 
 
+def repair_state(current: dict[str, Any] | None) -> dict[str, Any]:
+    """Read `current_slice.repair`, defaulting to round 0 when absent.
+
+    Runs created before the repair loop existed have no `repair` key, and
+    `normalize_run_state` deliberately does not backfill it (`_merge_missing`
+    covers only `supervision`), so every reader must tolerate absence.
+    """
+    repair = (current or {}).get("repair")
+    if not isinstance(repair, dict):
+        return default_repair_state()
+    defaults = default_repair_state()
+    return {
+        "round": int(repair.get("round") or 0),
+        "last_signature": str(repair.get("last_signature") or ""),
+        "signature_streak": int(repair.get("signature_streak") or 0),
+        "session_generation": int(repair.get("session_generation") or defaults["session_generation"]),
+    }
+
+
 def current_slice_state(
     repo: Path,
     plan_slice: PlanSlice,

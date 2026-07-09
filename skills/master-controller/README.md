@@ -1,6 +1,8 @@
 # Master Controller
 
-Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, verifies gates from outside the harness session, and stops whenever policy requires human approval.
+Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, and verifies gates from outside the harness session. When verification finds a fixable gap, MC runs a bounded self-correcting repair loop: it surfaces the specific violation back into the live orchestrator session (preserving the context the orchestrator already built), lets it fix the gap, and re-verifies with the complete, unrelaxed gate. Only integrity breaches, an exhausted repair budget, a tripped same-signature circuit breaker, or policy-required approvals stop the run for a human.
+
+The three roles: **MC** is the deterministic supervisor — it owns run state and gates, steers repairs, never writes slice code, and never delegates to a worker itself. The **orchestrator** is the harness in tmux executing one slice (scoped-implementation → validation → drift-audit → code-review → commit); it reports a structured result but holds no final authority. A **worker** is a bounded helper the orchestrator launches via `ai-orchestrator`'s `worker_jobs.py`; it owns no gates, never commits, and never re-delegates.
 
 MC has two documented operating styles. Model-supervised MC keeps the MC model in the loop for live operational judgment while deterministic commands own state transitions and gates. Deterministic batch MC runs the existing fail-closed `run-next` and `run --scope remaining` paths for simple unattended execution. The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, model-supervised observe/send/start/wait/pause/finalize/stop primitives, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
 
@@ -16,7 +18,9 @@ MC has two documented operating styles. Model-supervised MC keeps the MC model i
 - Running eligible slices sequentially with `run --scope remaining`.
 - Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, and `orchestrator-result.json` artifacts.
 - Recording supervision state and append-only operational event logs for model-supervised runs.
-- Verifying orchestrator claims against git evidence and stopping on missing validation, unresolved drift/review failures, unauthorized files, missing commits, dirty post-commit state, or approval-gated slices.
+- Verifying orchestrator claims against git evidence, classifying every non-pass gate outcome with a stable failure signature as repairable or terminal.
+- Driving the bounded repair loop: archiving the stale result, steering the live session with a targeted correction (or relaunching a fresh session per the circuit breaker), re-verifying with unrelaxed gates, and enforcing the repair budget from persisted state.
+- Stopping for a human on integrity breaches (HEAD not advanced or not descended from the slice start, wrong slice reported), exhausted repair budget, a tripped circuit breaker, or approval-gated slices.
 
 ## What MC Does Not Own
 
@@ -257,7 +261,7 @@ Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `act
 
 `run.json` includes a `supervision` object with default pause/retry policy, pause budgets, and the default continuation prompt. Existing runs that do not have this object load with backwards-compatible defaults. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
 
-While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, an optional `orchestrator_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`.
+While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, a `repair` object ({round, last_signature, signature_streak, session_generation} — the persisted repair-loop and circuit-breaker state), an optional `orchestrator_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`; it stays fixed across repair rounds and relaunches so verification remains cumulative. Repair rounds add per-round artifacts (`orchestrator-result-repair-<n>.json`, `repair-prompt-repair-<n>.md`, `pane-capture-repair-<n>.txt`, `git-status-repair-<n>.txt`) beside the standard slice artifacts. See `references/run-state-schema.md` for the full semantics.
 
 Worker state and temporary files should stay under the slice artifact directory. MC exports fixed paths for worker runs, temporary files, and tool-specific home directories so orchestrators do not have to invent locations.
 

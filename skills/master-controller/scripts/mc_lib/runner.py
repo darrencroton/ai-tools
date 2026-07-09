@@ -30,6 +30,7 @@ from .state import (
     normalize_stop_status,
     previous_completed_head,
     relative_artifact_path,
+    repair_state,
     slice_entry_from_gate,
     update_state_for_stop,
     write_run,
@@ -195,6 +196,10 @@ def start_model_supervised_slice(
         started_at,
         before_head,
         orchestrator_session_id,
+        # Persisted so finalize-slice (a separate invocation) verifies the
+        # worker-evidence gate from the slice's real requirement instead of
+        # silently dropping it when --worker-tools is not re-supplied.
+        configured_worker_tools,
     )
     state.setdefault("supervision", {})["mode"] = "model-supervised"
     state["stop_reason"] = None
@@ -279,36 +284,194 @@ def finalize_model_supervised_slice(
     capture_worker_runs_summary(slice_artifact_dir)
     after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
     gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status, worker_tools)
-    adapter.force_stop(session_name)
 
-    entry = slice_entry_from_gate(repo, plan_slice, slice_artifact_dir, started_at, gate, before_head, worker_tools)
-    state["slices"].append(entry)
-    state["current_slice"] = None
-    if gate.status == "pass":
-        state["status"] = idle_status_after_pass(state)
-        state["stop_reason"] = None
-        write_run(run_dir / "run.json", state)
-        return {"finalized": True, "status": "pass", "reason": gate.reason, "entry": entry}
+    run_json = run_dir / "run.json"
+    # Budget and circuit breaker are driven from the persisted
+    # current_slice.repair (round-0 default when absent): _attempt_for_slice
+    # counts appended slice entries, which in-session repairs deliberately do
+    # not create, so it must not gate this path.
+    repair = repair_state(current)
+    max_repairs = int(state.get("policy", {}).get("max_repair_attempts", DEFAULT_MAX_REPAIR_ATTEMPTS))
 
-    if gate.status == "repairable":
-        max_attempts = int(state.get("policy", {}).get("max_repair_attempts", 1)) + 1
-        if attempt < max_attempts:
-            state["status"] = "partial"
+    def finalize_terminal(terminal_gate: GateDecision) -> dict[str, Any]:
+        adapter.force_stop(session_name)
+        entry = slice_entry_from_gate(
+            repo,
+            plan_slice,
+            slice_artifact_dir,
+            started_at,
+            terminal_gate,
+            before_head,
+            worker_tools,
+            repair=dict(repair) if repair["round"] else None,
+        )
+        state["slices"].append(entry)
+        state["current_slice"] = None
+        if terminal_gate.status == "pass":
+            state["status"] = idle_status_after_pass(state)
             state["stop_reason"] = None
-            write_run(run_dir / "run.json", state)
-            return {
-                "finalized": True,
-                "status": "repairable",
-                "reason": gate.reason,
-                "next_action": "start-slice may retry the same slice within the repair-attempt cap",
-                "attempt": attempt,
-                "max_attempts": max_attempts,
-                "entry": entry,
-            }
-        gate = GateDecision("blocked", f"repair attempt cap exhausted after attempt {attempt}: {gate.reason}", gate.result, gate.actual_changed_files)
+            write_run(run_json, state)
+            return {"finalized": True, "status": "pass", "reason": terminal_gate.reason, "entry": entry}
+        update_state_for_stop(run_json, state, normalize_stop_status(terminal_gate.status), terminal_gate.reason)
+        return {"finalized": True, "status": terminal_gate.status, "reason": terminal_gate.reason, "entry": entry}
 
-    update_state_for_stop(run_dir / "run.json", state, normalize_stop_status(gate.status), gate.reason)
-    return {"finalized": True, "status": gate.status, "reason": gate.reason, "entry": entry}
+    if gate.status != "repairable":
+        # pass, or a terminal decision (integrity/trust breaches and the
+        # orchestrator's own considered stops): force_stop, append the entry,
+        # clear current_slice, and stop or idle as today.
+        return finalize_terminal(gate)
+
+    signature = gate.signature or "orchestrator-repairable"
+    if repair["round"] >= max_repairs:
+        return finalize_terminal(
+            GateDecision(
+                "blocked",
+                f"repair budget exhausted for {plan_slice.slice_id} "
+                f"({repair['round']}/{max_repairs} repairs used); last gate failure: {gate.reason}",
+                gate.result,
+                gate.actual_changed_files,
+                signature,
+            )
+        )
+    session_alive = adapter.session_exists(session_name)
+    streak = int(repair["signature_streak"]) + 1 if signature == repair["last_signature"] else 1
+    if session_alive and streak >= 3:
+        return finalize_terminal(
+            GateDecision(
+                "needs-human",
+                f"circuit breaker: gate signature {signature!r} failed {streak} consecutive times "
+                f"(after an in-session repair and a fresh-session retry); last gate failure: {gate.reason}",
+                gate.result,
+                gate.actual_changed_files,
+                signature,
+            )
+        )
+    round_number = int(repair["round"]) + 1
+    _record_repair_round_evidence(adapter, session_name, slice_artifact_dir, round_number, after_status)
+    if not session_alive:
+        # Dead before a repair could be delivered: relaunch fresh. Consumes
+        # budget but is not a circuit-breaker step.
+        mode = "relaunch"
+        repair["round"] = round_number
+    elif streak == 1:
+        mode = "in-session"
+        repair.update(round=round_number, last_signature=signature, signature_streak=1)
+    else:
+        mode = "fresh-session"
+        repair.update(round=round_number, last_signature=signature, signature_streak=2)
+    append_operational_event(
+        repo,
+        state,
+        {
+            "kind": "repair",
+            "slice_id": plan_slice.slice_id,
+            "round": round_number,
+            "signature": signature,
+            "mode": mode,
+            "tmux_session": session_name,
+            "gate_reason": gate.reason,
+        },
+    )
+
+    if mode == "in-session":
+        # Keep the live session and the populated current_slice (so
+        # start-slice still refuses a concurrent second attempt). The MC
+        # model delivers send_text via the send command — which the
+        # `resuming` status accepts — waits for a fresh result, and
+        # finalizes again.
+        repair_prompt_text = render_repair_prompt(plan_slice, slice_artifact_dir, gate, before_head=before_head)
+        repair_prompt_path = slice_artifact_dir / f"repair-prompt-repair-{round_number}.md"
+        repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
+        (slice_artifact_dir / "repair-prompt.md").write_text(repair_prompt_text, encoding="utf-8")
+        current["repair"] = dict(repair)
+        state["status"] = "resuming"
+        state["stop_reason"] = None
+        write_run(run_json, state)
+        return {
+            "finalized": False,
+            "status": "repairable",
+            "reason": gate.reason,
+            "repair": dict(repair),
+            "mode": mode,
+            "tmux_session": session_name,
+            "repair_prompt_path": relative_artifact_path(repo, repair_prompt_path),
+            "send_text": _repair_delivery_message(plan_slice, repair_prompt_path),
+            "next_action": "deliver send_text into the live session with the send command, wait for a fresh result, then finalize again",
+        }
+
+    # relaunch / fresh-session: the old session is finished with; launch a
+    # new session for the same slice with the original frozen prompt.
+    # start-slice cannot be used here — it refuses while current_slice is
+    # populated, and clearing current_slice would drop the persisted repair
+    # state the circuit breaker depends on.
+    adapter.force_stop(session_name)
+    repair["session_generation"] = int(repair["session_generation"]) + 1
+    generation = int(repair["session_generation"])
+    new_orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
+    relaunch_adapter = TmuxHarnessAdapter(
+        harness_name,
+        resolve_harness_command(args, repo, state, new_orchestrator_session_id),
+        getattr(args, "allow_unattended_default", False),
+        worker_tools,
+    )
+    new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
+    prompt_path = slice_artifact_dir / "prompt.md"
+    if not prompt_path.is_file():
+        prompt_path.write_text(
+            render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, worker_tools),
+            encoding="utf-8",
+        )
+    # Persist the new generation/session BEFORE launching it: a crash after
+    # the launch then finds run.json already pointing at the live session
+    # (fully recoverable), and a crash before it leaves a recorded session
+    # that simply does not exist (the next finalize fails closed). The old
+    # ordering could leave an unrecorded live session actively editing.
+    # current_slice.before_head stays the slice starting commit so
+    # verification remains cumulative across sessions.
+    current["tmux_session"] = new_session_name
+    current["attempt"] = generation
+    current["started_at"] = utc_now()
+    current["repair"] = dict(repair)
+    if new_orchestrator_session_id:
+        current["orchestrator_session_id"] = new_orchestrator_session_id
+    else:
+        current.pop("orchestrator_session_id", None)
+    state["status"] = "running"
+    state["stop_reason"] = None
+    write_run(run_json, state)
+    try:
+        relaunch_adapter.start(repo, new_session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
+        relaunch_adapter.send_prompt(new_session_name, prompt_path)
+    except Exception as exc:
+        _capture_failure_evidence(
+            relaunch_adapter,
+            session_name=new_session_name,
+            harness_name=harness_name,
+            repo=repo,
+            orchestrator_session_id=new_orchestrator_session_id,
+            slice_artifact_dir=slice_artifact_dir,
+            attempt=generation,
+            before_head=before_head,
+        )
+        relaunch_adapter.force_stop(new_session_name)
+        return finalize_terminal(
+            GateDecision(
+                "failed",
+                f"failed to relaunch orchestrator session for repair: {exc}",
+                gate.result,
+                gate.actual_changed_files,
+                signature,
+            )
+        )
+    return {
+        "finalized": False,
+        "status": "repairable",
+        "reason": gate.reason,
+        "repair": dict(repair),
+        "mode": mode,
+        "tmux_session": new_session_name,
+        "next_action": "wait for a fresh result from the relaunched session, then finalize again",
+    }
 
 
 def _record_repair_round_evidence(

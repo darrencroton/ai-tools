@@ -112,7 +112,7 @@ The final `orchestrator-result.json` must match the schema in `{result_schema_pa
 
 ## Repair Contract
 
-When MC's independent verification of a completed slice finds a fixable gap (a `repairable` gate signature), MC does not tear the session down. It sends a targeted repair prompt — rendered from the template below — into the **live** orchestrator session, so the orchestrator can fix the specific violation using the context it already built. The repair round is bounded: MC re-runs the complete gate with unrelaxed rigor after every repair, the repair budget is finite, and a signature that keeps failing escalates and then stops for a human. A repair prompt never expands the frozen contract; the authorized surface it restates is the same one the slice started with.
+When MC's independent verification of a completed slice finds a fixable gap (a `repairable` gate signature), MC does not tear the session down. It renders a targeted repair prompt from the template below, writes it to `repair-prompt-repair-<round>.md` in the slice artifact directory, and delivers a **single-line pointer** to that file into the **live** orchestrator session (typing multi-line text into a TUI risks premature submission), so the orchestrator can fix the specific violation using the context it already built. The repair round is bounded: MC re-runs the complete gate with unrelaxed rigor after every repair, the repair budget is finite, and a signature that keeps failing escalates to one fresh session and then stops for a human. A repair prompt never expands the frozen contract; the authorized surface it restates is the same one the slice started with.
 
 ## Repair Template
 

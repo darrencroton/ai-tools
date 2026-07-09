@@ -26,6 +26,7 @@ from mc_lib import runtime as mc_runtime  # noqa: E402
 from mc_lib import tmux_adapter as mc_tmux_adapter  # noqa: E402
 from mc_lib import commands as mc_commands  # noqa: E402
 from mc_lib import runner as mc_runner  # noqa: E402
+from mc_lib import state as mc_state  # noqa: E402
 
 
 def git(repo, *args):
@@ -2253,6 +2254,426 @@ Continue later.
         state = json.loads((((self.repo / ".ai-mc" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("orchestrator result missing", state["stop_reason"])
+
+    def _write_failing_validation_result(self, artifact, slice_id="Slice 1"):
+        artifact.mkdir(parents=True, exist_ok=True)
+        (artifact / "orchestrator-result.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "slice_id": slice_id,
+                    "status": "pass",
+                    "summary": "",
+                    "changed_files": [],
+                    "validation": [],
+                    "drift_audit": {"verdict": "PASS", "path": "drift-audit.md"},
+                    "code_review": {"verdict": "PASS", "path": "code-review.md"},
+                    "commit": {"requested": False, "created": False, "hash": None},
+                    "next_action": "",
+                    "blockers": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _model_supervised_current_slice(self, state, run_dir, repair=None):
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True, exist_ok=True)
+        current = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": git(self.repo, "rev-parse", "HEAD"),
+            "worker_tools": [],
+            "pause": None,
+        }
+        if repair is not None:
+            current["repair"] = repair
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = current
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        return artifact
+
+    def _finalize_args(self):
+        return argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+
+    def test_finalize_keeps_session_alive_on_repairable_gate(self):
+        # A repairable MC gate with budget remaining must not tear the session
+        # down: no force_stop, no slice entry, current_slice kept, status set
+        # to the send-eligible `resuming`, and the repair prompt surfaced. The
+        # current_slice here has NO repair key, proving the round-0 default
+        # for runs created before the repair loop existed.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = self._model_supervised_current_slice(state, run_dir)
+        self._write_failing_validation_result(artifact)
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        output = io.StringIO()
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 0)
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["finalized"])
+        self.assertEqual(result["status"], "repairable")
+        self.assertEqual(result["mode"], "in-session")
+        self.assertIn("NOT accepted", result["send_text"])
+        self.assertNotIn("\n", result["send_text"])
+        fake_adapter.force_stop.assert_not_called()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "resuming")
+        self.assertEqual(state["slices"], [])
+        self.assertEqual(state["current_slice"]["repair"], {
+            "round": 1,
+            "last_signature": "validation",
+            "signature_streak": 1,
+            "session_generation": 1,
+        })
+        self.assertTrue((artifact / "repair-prompt.md").exists())
+        self.assertTrue((artifact / "repair-prompt-repair-1.md").exists())
+        # The stale failing result was archived so a re-finalize cannot
+        # instantly re-read it.
+        self.assertTrue((artifact / "orchestrator-result-repair-1.json").exists())
+        self.assertFalse((artifact / "orchestrator-result.json").exists())
+        events = [
+            json.loads(line)
+            for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
+        ]
+        repair_events = [event for event in events if event["kind"] == "repair"]
+        self.assertEqual(len(repair_events), 1)
+        self.assertEqual(repair_events[0]["mode"], "in-session")
+        self.assertEqual(repair_events[0]["signature"], "validation")
+        self.assertEqual(repair_events[0]["round"], 1)
+
+    def test_start_slice_persists_worker_tools_for_later_finalize(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        fake_adapter = mock.Mock()
+        fake_adapter.sessions_with_prefix.return_value = []
+        fake_adapter.harness_name = "codex"
+        fake_adapter.allow_unattended_default = False
+        fake_adapter.command_override = "python fake.py"
+        fake_adapter.command = "python fake.py"
+        args = argparse.Namespace(
+            harness_command="python fake.py",
+            worker_tools="opencode",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            result = mc.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+        self.assertTrue(result["started"])
+        persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["current_slice"]["worker_tools"], ["opencode"])
+
+    def test_finalize_enforces_worker_evidence_from_persisted_state(self):
+        # finalize-slice is a separate invocation that may not re-supply
+        # --worker-tools: the worker-evidence gate must still fire from the
+        # requirement persisted in current_slice at start-slice time.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": before,
+            "worker_tools": ["opencode"],
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        output = io.StringIO()
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(output):
+                # _finalize_args passes worker_tools="" — the gate must come
+                # from persisted state, not this invocation's flags.
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "repairable")
+        self.assertEqual(result["repair"]["last_signature"], "worker-evidence")
+        self.assertIn("worker-evidence.md", result["reason"])
+
+    def test_finalize_pass_still_force_stops_session(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "mc_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": mc.utc_now(),
+            "before_head": before,
+            "worker_tools": [],
+            "pause": None,
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 0)
+        fake_adapter.force_stop.assert_called_once_with("mc_test_slice-001_a1")
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "partial")
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(state["slices"][0]["status"], "pass")
+
+    def test_finalize_integrity_gate_is_terminal_without_repair(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = self._model_supervised_current_slice(state, run_dir)
+        self._write_failing_validation_result(artifact, slice_id="Slice 99")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 2)
+        fake_adapter.force_stop.assert_called_once()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("slice_id does not match", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(len(state["slices"]), 1)
+        self.assertNotIn("repair", state["slices"][0])
+        self.assertFalse((artifact / "repair-prompt.md").exists())
+
+    def test_finalize_budget_exhaustion_is_terminal(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = self._model_supervised_current_slice(
+            state,
+            run_dir,
+            repair={"round": 3, "last_signature": "validation", "signature_streak": 1, "session_generation": 1},
+        )
+        self._write_failing_validation_result(artifact)
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 2)
+        fake_adapter.force_stop.assert_called_once()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("repair budget exhausted", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(len(state["slices"]), 1)
+        self.assertEqual(state["slices"][0]["repair"]["round"], 3)
+
+    def test_run_next_refuses_while_current_slice_is_active(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        self._model_supervised_current_slice(
+            state,
+            run_dir,
+            repair={"round": 1, "last_signature": "validation", "signature_streak": 1, "session_generation": 1},
+        )
+        run_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=5,
+            poll_seconds=0.1,
+            harness_command="python fake.py",
+        )
+        with self.assertRaisesRegex(mc.McError, "active current slice"):
+            mc.run_next(run_args)
+        run_args.scope = "remaining"
+        with self.assertRaisesRegex(mc.McError, "active current slice"):
+            mc.run_remaining(run_args)
+
+    def test_repair_state_defaults_when_absent(self):
+        # Codex #8: runs created before the repair loop have no
+        # current_slice.repair and must load with a round-0 default;
+        # normalize_run_state deliberately does not backfill it.
+        self.assertEqual(
+            mc_state.repair_state(None),
+            {"round": 0, "last_signature": "", "signature_streak": 0, "session_generation": 1},
+        )
+        self.assertEqual(mc_state.repair_state({"slice_id": "Slice 1"})["round"], 0)
+        self.assertEqual(
+            mc_state.repair_state({"repair": {"round": 2, "last_signature": "drift"}}),
+            {"round": 2, "last_signature": "drift", "signature_streak": 0, "session_generation": 1},
+        )
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_model_supervised_send_then_finalize_accepts_corrected_slice(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "in_session_repair.py"
+        write_in_session_repair_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=20,
+            poll_seconds=0.1,
+            reason="repair delivery",
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.start_slice(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        finalize_output = io.StringIO()
+        with contextlib.redirect_stdout(finalize_output):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+        first = json.loads(finalize_output.getvalue())
+        self.assertEqual(first["status"], "repairable")
+        self.assertEqual(first["mode"], "in-session")
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "resuming")
+        self.assertIsNotNone(state["current_slice"])
+        command_args.text = first["send_text"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.send(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "partial")
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(state["slices"][0]["status"], "pass")
+        self.assertEqual(state["slices"][0]["repair"]["round"], 1)
+        self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_model_supervised_circuit_breaker_matches_batch_path(self):
+        # Same signature: in-session nudge, then a fresh-session relaunch by
+        # finalize (start-slice refuses while current_slice is populated),
+        # then terminal — identical to the batch-path breaker.
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "always_failing_validation.py"
+        write_always_failing_validation_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        command_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            seconds=20,
+            poll_seconds=0.1,
+            reason="repair delivery",
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.start_slice(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        first_output = io.StringIO()
+        with contextlib.redirect_stdout(first_output):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+        first = json.loads(first_output.getvalue())
+        self.assertEqual(first["mode"], "in-session")
+        command_args.text = first["send_text"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.send(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        second_output = io.StringIO()
+        with contextlib.redirect_stdout(second_output):
+            self.assertEqual(mc.finalize_slice(command_args), 0)
+        second = json.loads(second_output.getvalue())
+        self.assertEqual(second["mode"], "fresh-session")
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "running")
+        self.assertEqual(state["current_slice"]["attempt"], 2)
+        self.assertTrue(state["current_slice"]["tmux_session"].endswith("_a2"))
+        self.assertEqual(state["current_slice"]["repair"]["signature_streak"], 2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.wait(command_args), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.finalize_slice(command_args), 2)
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "needs-human")
+        self.assertIn("circuit breaker", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(state["slices"][0]["repair"]["round"], 2)
 
     def test_start_slice_reaps_stale_run_sessions_before_launch(self):
         self.prepare_committed_repo()

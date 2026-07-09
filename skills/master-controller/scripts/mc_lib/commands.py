@@ -67,6 +67,7 @@ from .state import (
     operational_events_file,
     previous_completed_head,
     relative_artifact_path,
+    repair_state,
     resolve_run_dir,
     resolve_run_path,
     slice_entry_from_gate,
@@ -725,6 +726,17 @@ def run_next(args: argparse.Namespace) -> int:
         print("No remaining slices.")
         return 0
     if not args.dry_run:
+        # next_slice() ignores current_slice, so batch execution over a live
+        # model-supervised slice (possibly mid-repair) would launch a second
+        # session for the same slice and orphan the live one.
+        current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+        if current:
+            repair = repair_state(current)
+            raise McError(
+                f"run has an active current slice ({current.get('slice_id')}, repair round {repair['round']}): "
+                "finish it through the model-supervised path (wait / send / finalize-slice) or stop it explicitly "
+                "(stop, stop-with-evidence) before batch execution"
+            )
         # execute_slice owns the runtime eligibility gate and the stop-state
         # write; run_next only reports for --dry-run.
         return execute_slice(args, repo, state, candidate, run_dir)

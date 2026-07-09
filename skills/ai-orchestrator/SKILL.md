@@ -118,7 +118,7 @@ Every prompt sent to an external tool must be self-contained. Always use the rol
 For implementation work, include the frozen contract: intended slice, allowed files/functions, expected tests, explicit non-goals, risky surfaces, and validation plan. Workers may implement inside the contract or audit against it, but they must not expand it or approve drift.
 For correctness-critical investigations, explicitly name the evidence scope the worker must check before concluding: the files, directories, docs, configs, schemas, or artifacts that materially affect the answer.
 
-Every delegated prompt must also place the receiver in worker mode: it is not the orchestrator, it must not invoke `ai-orchestrator`, and it must not re-delegate to another model. If blocked, it should report the blocker instead of bouncing the task onward.
+Every delegated prompt must also place the receiver in worker mode: it is not the orchestrator, it must not invoke `ai-orchestrator`, and it must not re-delegate to another model. If blocked, it should report the blocker instead of bouncing the task onward. Under Master Controller supervision this boundary is also mechanical: workers own no acceptance gates and never create the slice commit — those belong to the orchestrator, and MC verifies them (including mechanical evidence that a required worker actually ran).
 If two workers must edit overlapping files, serialise them or refactor the scope split — do not run them in parallel.
 Use absolute file paths when practical. For analysis and investigation prompts, require `path:line` evidence for every material claim. Inside shell-quoted prompts, use `SECTION: NAME` markers rather than Markdown headings that start with `#`. Keep worker outputs compact and high-signal.
 
