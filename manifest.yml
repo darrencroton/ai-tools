@@ -1,0 +1,61 @@
+# manifest.yml — declarative config for the AI agent home
+#
+# Read by setup.sh. This file uses a deliberately constrained YAML subset so
+# the setup script can parse it without external dependencies:
+#
+#   - top-level scalar keys:        key: value
+#   - top-level list-of-map keys:   list items start with "- key: value",
+#                                   continuation lines are "  key: value"
+#   - comments (#) and blank lines are ignored
+#   - no nesting beyond the shapes shown below, no multi-line values
+#
+# Sections:
+#
+#   agent_home   canonical agent home path (usually a symlink to this repo's
+#                clone; setup resolves symlinks and works either way)
+#
+#   repos        external skill repos cloned under <agent_home>/repos/.
+#                Each repo exposes skills as skills/<name>/SKILL.md.
+#                This repo (ai-agent-home) is the base install and is NOT
+#                listed here.
+#                  name     directory name under repos/ (required)
+#                  url      git clone URL (required)
+#                  branch   branch to clone/track (default: main)
+#                  enabled  false skips clone/update/skill-linking (default: true)
+#                  update   false skips `git pull` on setup runs (default: true)
+#
+#   tool_links   coding-agent harnesses to wire to the shared agent home.
+#                For each tool, setup creates inside config_dir:
+#                  <instructions_link> -> <agent_home>/AGENTS.md
+#                  <skills_link>       -> <agent_home>/skills
+#                Tools whose config_dir does not exist are skipped.
+
+agent_home: ~/.agents
+
+repos:
+  - name: ai-engineering-skills
+    url: git@github.com:darrencroton/ai-engineering-skills.git
+    branch: main
+    enabled: true
+    update: true
+
+tool_links:
+  - name: claude
+    config_dir: ~/.claude
+    instructions_link: CLAUDE.md
+    skills_link: skills
+
+  - name: codex
+    config_dir: ~/.codex
+    instructions_link: AGENTS.md
+    skills_link: skills
+
+  - name: opencode
+    config_dir: ~/.config/opencode
+    instructions_link: AGENTS.md
+    skills_link: skills
+
+  - name: copilot
+    config_dir: ~/.copilot
+    instructions_link: copilot-instructions.md
+    skills_link: skills
