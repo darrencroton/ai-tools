@@ -25,6 +25,7 @@ SPEC.loader.exec_module(mc)
 from mc_lib import runtime as mc_runtime  # noqa: E402
 from mc_lib import tmux_adapter as mc_tmux_adapter  # noqa: E402
 from mc_lib import commands as mc_commands  # noqa: E402
+from mc_lib import observation as mc_observation  # noqa: E402
 from mc_lib import runner as mc_runner  # noqa: E402
 from mc_lib import state as mc_state  # noqa: E402
 
@@ -163,6 +164,22 @@ def write_no_result_harness(path):
             import time
 
             time.sleep(1)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_hanging_harness(path):
+    # Never writes a result and outlives any test timeout, so the batch
+    # driver's --timeout-seconds path is what ends the run.
+    path.write_text(
+        textwrap.dedent(
+            """
+            import time
+
+            time.sleep(60)
             """
         ).strip()
         + "\n",
@@ -1196,7 +1213,7 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(mc.observe(args), 0)
@@ -1238,7 +1255,7 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(mc.send(args), 0)
         fake_adapter.send_literal.assert_called_once_with("mc_test_slice-001_a1", "You were interrupted. Continue.")
@@ -1280,7 +1297,7 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with self.assertRaisesRegex(mc.McError, "hard prompt"):
                 mc.send(args)
         fake_adapter.send_literal.assert_not_called()
@@ -1464,7 +1481,7 @@ Continue later.
             harness_model=None,
         )
 
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(mc.observe(args), 0)
@@ -2051,6 +2068,7 @@ Continue later.
             self.assertEqual(mc.run_next(run_args), 0)
         state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
+        self.assertEqual(state["supervision"]["mode"], "deterministic-batch")
         self.assertEqual(state["slices"][0]["status"], "pass")
         self.assertEqual(state["slices"][0]["changed_files"], ["README.md"])
         slice_dir = (self.repo / ".ai-mc" / "current").resolve() / "slices" / "slice-001"
@@ -2223,7 +2241,7 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             wait_output = io.StringIO()
             with contextlib.redirect_stdout(wait_output):
                 self.assertEqual(mc.wait(command_args), 0)
@@ -2319,6 +2337,80 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
+
+    def test_wait_observing_policy_flag_gates_hard_signals(self):
+        # The one shared wait loop serves both drivers; stop_on_hard_signals
+        # is the per-driver policy. True (model-supervised) breaks on a hard
+        # prompt so the model can judge it; False (batch) keeps polling —
+        # detection markers are broad substring matches, and the safety
+        # boundary is send-time refusal, not the wait. The activity log is
+        # appended on every poll either way.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = self._model_supervised_current_slice(state, run_dir)
+        fake_adapter = mock.Mock()
+        fake_adapter.detect_activity.return_value = {
+            "running": True,
+            "active": True,
+            "capture": "Do you trust the files in this folder?\n",
+        }
+        fake_adapter.detect_hard_prompt.side_effect = mc.TmuxHarnessAdapter.detect_hard_prompt
+        wait_args = self._finalize_args()
+        wait_args.poll_seconds = 0.05
+        activity_log = artifact / "activity-attempt-1.jsonl"
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
+            reason, snapshot = mc_observation.wait_observing(
+                wait_args, self.repo.resolve(), run_dir, 5, activity_log=activity_log
+            )
+            self.assertEqual(reason, "hard-prompt")
+            self.assertTrue(snapshot["prompt_on_screen"]["present"])
+            # Breaking on the first poll still records exactly one activity
+            # line: the audit trail must not depend on winning a race.
+            first_wait_lines = activity_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(first_wait_lines), 1)
+            batch_reason, _snapshot = mc_observation.wait_observing(
+                wait_args, self.repo.resolve(), run_dir, 0.2, activity_log=activity_log, stop_on_hard_signals=False
+            )
+        self.assertEqual(batch_reason, "timeout")
+        lines = activity_log.read_text(encoding="utf-8").splitlines()
+        # The batch wait appends per poll, not per call: a 0.2s wait at a
+        # 0.05s cadence must add several lines before timing out.
+        self.assertGreaterEqual(len(lines) - len(first_wait_lines), 2)
+        for line in lines:
+            self.assertEqual(set(json.loads(line)), {"active", "checked_at", "running"})
+
+    def test_start_slice_rerun_seeds_repair_generation_from_attempt(self):
+        # A rerun of a previously failed slice starts at attempt 2; the repair
+        # session generation must seed from that real attempt, or a later
+        # fresh-session relaunch would increment 1 -> 2 and collide with this
+        # attempt's own session and artifact names.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        state["slices"].append({"slice_id": "Slice 1", "status": "failed"})
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        fake_adapter = mock.Mock()
+        fake_adapter.sessions_with_prefix.return_value = []
+        fake_adapter.harness_name = "codex"
+        fake_adapter.allow_unattended_default = False
+        fake_adapter.command_override = "python fake.py"
+        fake_adapter.command = "python fake.py"
+        args = argparse.Namespace(
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            result = mc.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+        self.assertTrue(result["started"])
+        self.assertEqual(result["attempt"], 2)
+        self.assertTrue(result["tmux_session"].endswith("_a2"))
+        persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["current_slice"]["repair"]["session_generation"], 2)
+        self.assertEqual(persisted["current_slice"]["repair"]["round"], 0)
 
     def test_finalize_keeps_session_alive_on_repairable_gate(self):
         # A repairable MC gate with budget remaining must not tear the session
@@ -2753,7 +2845,7 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(mc.pause_until(args), 0)
         paused = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -2793,7 +2885,7 @@ Continue later.
             harness_model=None,
         )
 
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(mc.wait(args), 0)
@@ -2836,14 +2928,14 @@ Continue later.
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with self.assertRaisesRegex(mc.McError, "max_single_pause_seconds"):
                 mc.pause_until(args)
 
         state["supervision"]["max_single_pause_seconds"] = 21600
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Weekly usage limit reached."}
-        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter):
+        with mock.patch.object(mc_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with self.assertRaisesRegex(mc.McError, "hard-stop operational hint"):
                 mc.pause_until(args)
 
@@ -2891,6 +2983,35 @@ Continue later.
         state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("orchestrator result missing", state["stop_reason"])
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
+    def test_run_next_times_out_hanging_session_with_evidence(self):
+        self.prepare_committed_repo()
+        harness = Path(self.tmp.name) / "hanging_harness.py"
+        write_hanging_harness(harness)
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.init_run(args), 0)
+        run_args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            dry_run=False,
+            timeout_seconds=3,
+            poll_seconds=0.1,
+            harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.run_next(run_args), 2)
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        slice_dir = run_dir / "slices" / "slice-001"
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("timeout waiting for orchestrator-result.json", state["stop_reason"])
+        self.assertIsNone(state["current_slice"])
+        self.assertEqual(state["supervision"]["mode"], "deterministic-batch")
+        self.assertTrue((slice_dir / "pane-capture-timeout.txt").exists())
+        self.assertTrue((slice_dir / "pane-capture.txt").exists())
+        self.assertTrue((slice_dir / "activity-attempt-1.jsonl").exists())
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_next_retries_once_after_repairable_result(self):

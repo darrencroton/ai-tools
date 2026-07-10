@@ -12,7 +12,6 @@ from .cli import build_parser, main
 from .commands import (
     approve_slice,
     archive_sensitive,
-    build_observation,
     finalize_slice,
     init_run,
     list_profiles,
@@ -22,7 +21,6 @@ from .commands import (
     preflight,
     print_check,
     reconcile,
-    record_observation,
     run_next,
     run_remaining,
     send,
@@ -80,6 +78,7 @@ from .git_ops import (
     write_git_diff,
 )
 from .models import CommandResult, GateDecision, McError, PlanSlice
+from .observation import build_observation, record_observation, wait_observing
 from .plan import (
     completed_slice_ids,
     duplicate_slice_numbers,
@@ -277,6 +276,7 @@ __all__ = [
     "worker_jobs_path",
     "worker_model_effort_guidance_text",
     "wait",
+    "wait_observing",
     "write_git_diff",
     "write_orchestrator_result",
     "write_reconciliation_artifact",

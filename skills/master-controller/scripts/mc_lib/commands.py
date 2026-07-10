@@ -35,6 +35,14 @@ from .git_ops import (
     write_git_diff,
 )
 from .models import McError
+from .observation import (
+    _current_adapter,
+    _raise_on_hard_stop_hints,
+    _slice_artifact_dir,
+    build_observation,
+    record_observation,
+    wait_observing,
+)
 from .process import run_command
 from .plan import (
     completed_slice_ids,
@@ -51,7 +59,6 @@ from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
     environment_preflight,
-    extract_operational_hints,
     result_schema_path,
     sensitive_artifact_dirs,
     slice_dir_name,
@@ -357,197 +364,6 @@ def _json_print(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _slice_artifact_dir(repo: Path, current: dict[str, Any]) -> Path:
-    value = current.get("artifact_dir")
-    if not value:
-        raise McError("current slice has no artifact_dir")
-    path = Path(str(value))
-    return path if path.is_absolute() else repo / path
-
-
-def _current_adapter(args: argparse.Namespace, repo: Path, state: dict[str, Any]) -> TmuxHarnessAdapter:
-    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else {}
-    session_id = current.get("orchestrator_session_id") if isinstance(current, dict) else None
-    return TmuxHarnessAdapter(
-        state["harness"]["name"],
-        resolve_harness_command(args, repo, state, str(session_id) if session_id else None),
-        getattr(args, "allow_unattended_default", False),
-        parse_worker_tools(getattr(args, "worker_tools", None)),
-    )
-
-
-def _result_status(result_path: Path) -> dict[str, Any]:
-    if not result_path.exists():
-        return {"exists": False, "parse_status": "absent", "path": str(result_path)}
-    try:
-        data = json.loads(result_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return {"exists": True, "parse_status": "invalid", "path": str(result_path), "error": str(exc)}
-    return {
-        "exists": True,
-        "parse_status": "valid" if isinstance(data, dict) else "invalid",
-        "path": str(result_path),
-        "status": data.get("status") if isinstance(data, dict) else None,
-        "slice_id": data.get("slice_id") if isinstance(data, dict) else None,
-    }
-
-
-def _read_tail(path: Path, limit: int = 4000) -> str:
-    if not path.exists():
-        return ""
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        size = handle.tell()
-        handle.seek(max(0, size - (limit * 4)))
-        text = handle.read().decode("utf-8", errors="replace")
-    return text[-limit:]
-
-
-def _hard_stop_hint_kinds(snapshot: dict[str, Any]) -> list[str]:
-    hints = snapshot.get("operational_hints")
-    if not isinstance(hints, list):
-        return []
-    kinds: list[str] = []
-    for hint in hints:
-        if not isinstance(hint, dict) or not hint.get("hard_stop"):
-            continue
-        kind = str(hint.get("kind") or "unknown")
-        subtype = hint.get("subtype")
-        label = f"{kind}:{subtype}" if subtype else kind
-        if label not in kinds:
-            kinds.append(label)
-    return kinds
-
-
-def _raise_on_hard_stop_hints(snapshot: dict[str, Any], action: str) -> None:
-    kinds = _hard_stop_hint_kinds(snapshot)
-    if kinds:
-        raise McError(f"refusing to {action} while hard-stop operational hint is present: " + ", ".join(kinds))
-
-
-def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
-    now_text = utc_now()
-    snapshot: dict[str, Any] = {
-        "run_id": state.get("run_id"),
-        "status": state.get("status"),
-        "repo_path": state.get("repo_path"),
-        "branch": state.get("branch"),
-        "current_time": {
-            "utc": now_text,
-            "local": datetime.now().astimezone().replace(microsecond=0).isoformat(),
-        },
-        "harness": state.get("harness", {}),
-        "current_slice": None,
-        "process": {"running": False},
-        "prompt_on_screen": {"present": False, "kinds": [], "markers": []},
-        "operational_hints": [],
-        "artifacts": {"run_dir": str(run_dir), "operational_events": str(operational_events_file(repo, state))},
-        "result": {"exists": False, "parse_status": "no-current-slice"},
-        "git": {"status_lines": meaningful_status_lines(git_status_text(repo))},
-    }
-    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
-    if not current:
-        return snapshot
-
-    artifact_dir = _slice_artifact_dir(repo, current)
-    attempt = int(current.get("attempt") or 1)
-    session_name = str(current.get("tmux_session") or "")
-    started_at = str(current.get("started_at") or "")
-    elapsed_seconds: int | None = None
-    if started_at:
-        try:
-            elapsed_seconds = int((datetime.now(timezone.utc) - parse_iso_datetime(started_at)).total_seconds())
-        except ValueError:
-            elapsed_seconds = None
-
-    adapter = _current_adapter(args, repo, state)
-    previous_path = artifact_dir / "pane-capture-live-latest.txt"
-    previous_capture = previous_path.read_text(encoding="utf-8") if previous_path.exists() else ""
-    activity = adapter.detect_activity(session_name, previous_capture)
-    capture = str(activity.get("capture") or "")
-    live_capture_path = artifact_dir / f"pane-capture-live-attempt-{attempt}.txt"
-    if capture:
-        live_capture_path.parent.mkdir(parents=True, exist_ok=True)
-        live_capture_path.write_text(capture, encoding="utf-8")
-        previous_path.write_text(capture, encoding="utf-8")
-    hard_prompt = adapter.detect_hard_prompt(capture)
-    result_path = artifact_dir / "orchestrator-result.json"
-    transcript_path = artifact_dir / "orchestrator-transcript.jsonl"
-    result = _result_status(result_path)
-    transcript_tail = _read_tail(transcript_path)
-    hints = extract_operational_hints(
-        capture,
-        transcript_text=transcript_tail,
-        process_running=bool(activity.get("running")),
-        process_active=bool(activity.get("active")),
-        result_exists=bool(result.get("exists")),
-        max_single_pause_seconds=int(state.get("supervision", {}).get("max_single_pause_seconds", 21600)),
-    )
-    snapshot.update(
-        {
-            "current_slice": {
-                "slice_id": current.get("slice_id"),
-                "title": current.get("title"),
-                "attempt": attempt,
-                "started_at": started_at,
-                "elapsed_seconds": elapsed_seconds,
-                "before_head": current.get("before_head"),
-                "tmux_session": session_name,
-                "artifact_dir": relative_artifact_path(repo, artifact_dir),
-                "pause": current.get("pause"),
-            },
-            "process": {"running": bool(activity.get("running")), "active": bool(activity.get("active"))},
-            "prompt_on_screen": hard_prompt,
-            "pane": {
-                "capture_path": relative_artifact_path(repo, previous_path),
-                "tail": capture[-4000:],
-                "tail_truncated": len(capture) > 4000,
-            },
-            "transcript": {
-                "path": relative_artifact_path(repo, transcript_path) if transcript_path.exists() else None,
-                "tail": transcript_tail,
-                "tail_truncated": transcript_path.exists() and len(transcript_tail) >= 4000,
-            },
-            "artifacts": {
-                "run_dir": str(run_dir),
-                "artifact_dir": relative_artifact_path(repo, artifact_dir),
-                "pane_capture_latest": relative_artifact_path(repo, previous_path),
-                "transcript_path": relative_artifact_path(repo, transcript_path) if transcript_path.exists() else None,
-                "operational_events": str(operational_events_file(repo, state)),
-                "observation_latest": relative_artifact_path(repo, artifact_dir / "observation-latest.json"),
-            },
-            "result": result,
-            "operational_hints": hints,
-        }
-    )
-    return snapshot
-
-
-def record_observation(repo: Path, state: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
-    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
-    event = append_operational_event(
-        repo,
-        state,
-        {
-            "kind": "observation",
-            "status": "recorded",
-            "slice_id": current.get("slice_id") if current else None,
-            "attempt": current.get("attempt") if current else None,
-            "evidence_path": snapshot.get("pane", {}).get("capture_path") if isinstance(snapshot.get("pane"), dict) else "",
-            "process_running": snapshot.get("process", {}).get("running"),
-            "result_exists": snapshot.get("result", {}).get("exists"),
-            "hard_prompt": snapshot.get("prompt_on_screen", {}),
-            "hard_stop_hints": _hard_stop_hint_kinds(snapshot),
-        },
-    )
-    snapshot["operational_event_id"] = event["event_id"]
-    current_snapshot = snapshot.get("current_slice") if isinstance(snapshot.get("current_slice"), dict) else None
-    if current_snapshot:
-        artifact_dir = _slice_artifact_dir(repo, current_snapshot)
-        (artifact_dir / "observation-latest.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return snapshot
-
-
 def observe(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
@@ -638,70 +454,10 @@ def start_slice(args: argparse.Namespace) -> int:
     return 0 if result.get("started") else 2
 
 
-def _observation_signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
-    """Compact fingerprint of the decision-relevant observation state."""
-    hard_prompt = snapshot.get("prompt_on_screen", {})
-    return (
-        bool(snapshot.get("process", {}).get("running")),
-        bool(snapshot.get("result", {}).get("exists")),
-        tuple(hard_prompt.get("kinds", []) if isinstance(hard_prompt, dict) else ()),
-        tuple(_hard_stop_hint_kinds(snapshot)),
-    )
-
-
-# Floor between recorded observation events while nothing changes. Polling
-# still happens at --poll-seconds for responsiveness; recording every poll
-# flooded operational-events.jsonl (a 6-hour pause at a 2s cadence is ~10k
-# near-identical "observation" events drowning the real signals).
-_OBSERVATION_EVENT_FLOOR_SECONDS = 60.0
-
-
-def _wait_observing(args: argparse.Namespace, repo: Path, run_dir: Path, seconds: float) -> tuple[str, dict[str, Any]]:
-    deadline = time.monotonic() + max(0.0, float(seconds))
-    final_snapshot: dict[str, Any] = {}
-    reason = "timeout"
-    last_recorded_signature: tuple[Any, ...] | None = None
-    last_recorded_at = float("-inf")
-    while True:
-        state = load_run(run_dir)
-        final_snapshot = build_observation(args, repo, run_dir, state)
-        signature = _observation_signature(final_snapshot)
-        breaking = (
-            final_snapshot.get("result", {}).get("exists")
-            or not final_snapshot.get("process", {}).get("running")
-            or (isinstance(final_snapshot.get("prompt_on_screen"), dict) and final_snapshot["prompt_on_screen"].get("present"))
-            or bool(_hard_stop_hint_kinds(final_snapshot))
-            or time.monotonic() >= deadline
-        )
-        # Record on change, on the cadence floor, and always on the final
-        # snapshot so the wait's evidence pointer refers to a recorded event.
-        if breaking or signature != last_recorded_signature or time.monotonic() - last_recorded_at >= _OBSERVATION_EVENT_FLOOR_SECONDS:
-            final_snapshot = record_observation(repo, state, final_snapshot)
-            last_recorded_signature = signature
-            last_recorded_at = time.monotonic()
-        if final_snapshot.get("result", {}).get("exists"):
-            reason = "result-ready"
-            break
-        if not final_snapshot.get("process", {}).get("running"):
-            reason = "process-exited"
-            break
-        hard_prompt = final_snapshot.get("prompt_on_screen", {})
-        if isinstance(hard_prompt, dict) and hard_prompt.get("present"):
-            reason = "hard-prompt"
-            break
-        if _hard_stop_hint_kinds(final_snapshot):
-            reason = "hard-stop-hint"
-            break
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(min(float(args.poll_seconds), max(0.0, deadline - time.monotonic())))
-    return reason, final_snapshot
-
-
 def wait(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
-    reason, final_snapshot = _wait_observing(args, repo, run_dir, float(args.seconds))
+    reason, final_snapshot = wait_observing(args, repo, run_dir, float(args.seconds))
     append_operational_event(
         repo,
         load_run(run_dir),
@@ -771,7 +527,7 @@ def pause_until(args: argparse.Namespace) -> int:
     update_run_locked(run_dir / "run.json", mark_paused)
     wait_args = copy.copy(args)
     wait_args.poll_seconds = args.poll_seconds
-    wait_reason, wait_snapshot = _wait_observing(wait_args, repo, run_dir, pause_seconds)
+    wait_reason, wait_snapshot = wait_observing(wait_args, repo, run_dir, pause_seconds)
     append_operational_event(
         repo,
         load_run(run_dir),

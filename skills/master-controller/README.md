@@ -257,7 +257,7 @@ State is stored under the target repository:
 
 MC does not edit the project's own `.gitignore`. Instead, `init` writes a self-ignoring `.ai-mc/.gitignore` containing `*`, so the audit directory — including seeded worker credentials and full transcripts — is never staged by a stray `git add -A`. MC's own dirty-tree and changed-file checks already exclude `.ai-mc/`.
 
-Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit.
+Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit. Batch polling also records `observation` operational events to `operational-events.jsonl` (on state change, with a 60-second floor while nothing changes) and refreshes `observation-latest.json` — the same evidence the model-supervised `observe`/`wait` primitives produce.
 
 `run.json` includes a `supervision` object with default pause/retry policy, pause budgets, and the default continuation prompt. Existing runs that do not have this object load with backwards-compatible defaults. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
 
@@ -289,7 +289,7 @@ The plan is frozen at `init` by content digest. If the plan file changes mid-run
 
 The model-supervised transition adds these durable concepts without changing deterministic gate acceptance:
 
-- `supervision.mode`: defaults to `deterministic-batch`; `start-slice` sets it to `model-supervised`.
+- `supervision.mode`: defaults to `deterministic-batch`; `start-slice` sets it to `model-supervised`, and the batch driver re-asserts `deterministic-batch` at each slice start.
 - `supervision.pause_policy`: names recoverable rolling-window and transient-service handling while preserving hard stops for weekly/account/unknown events.
 - `supervision.pause_counters`: tracks consecutive pauses for the current slice and cumulative paused seconds for the run.
 - `operational_events_path`: points at the append-only JSONL event log for observations, sends, waits, pauses, resumes, and stops.

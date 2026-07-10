@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from .constants import DEFAULT_MAX_REPAIR_ATTEMPTS, KNOWN_UNATTENDED_HARNESS_COMMANDS
+from .constants import DEFAULT_MAX_REPAIR_ATTEMPTS, KNOWN_UNATTENDED_HARNESS_COMMANDS, RUN_STOP_STATUSES
 from .gates import verify_gate
 from .git_ops import git, git_head, git_status_text, require_clean_worktree, write_git_diff
 from .models import GateDecision, McError, PlanSlice
+from .observation import _current_adapter, _slice_artifact_dir, wait_observing
 from .plan import eligibility
 from .profiles import parse_worker_tools, resolve_harness_command
 from .runtime import (
@@ -28,6 +28,7 @@ from .state import (
     current_slice_state,
     default_repair_state,
     idle_status_after_pass,
+    load_run,
     normalize_stop_status,
     previous_completed_head,
     relative_artifact_path,
@@ -192,6 +193,7 @@ def start_model_supervised_slice(
     state: dict[str, Any],
     plan_slice: PlanSlice,
     run_dir: Path,
+    supervision_mode: str = "model-supervised",
 ) -> dict[str, Any]:
     run_json = run_dir / "run.json"
     if isinstance(state.get("current_slice"), dict):
@@ -251,6 +253,13 @@ def start_model_supervised_slice(
     (slice_artifact_dir / f"git-status-before-attempt-{attempt}.txt").write_text(before_status, encoding="utf-8")
     (slice_artifact_dir / "git-status-before.txt").write_text(before_status, encoding="utf-8")
     session_name = tmux_session_name(state["run_id"], plan_slice, attempt)
+    # Seed the repair session generation from the real attempt number, not a
+    # constant 1: a rerun of a previously failed slice starts at attempt 2, and
+    # a later fresh-session relaunch increments the generation to name its new
+    # session/artifacts — seeding at 1 would relaunch as "_a2" and collide with
+    # this attempt's own names.
+    initial_repair = default_repair_state()
+    initial_repair["session_generation"] = attempt
     state["status"] = "running"
     state["current_slice"] = current_slice_state(
         repo,
@@ -265,8 +274,9 @@ def start_model_supervised_slice(
         # worker-evidence gate from the slice's real requirement instead of
         # silently dropping it when --worker-tools is not re-supplied.
         configured_worker_tools,
+        initial_repair,
     )
-    state.setdefault("supervision", {})["mode"] = "model-supervised"
+    state.setdefault("supervision", {})["mode"] = supervision_mode
     reset_slice_pause_counters(state)
     state["stop_reason"] = None
     write_run(run_json, state)
@@ -304,6 +314,53 @@ def start_model_supervised_slice(
         "before_head": before_head,
         "reaped_stale_sessions": reaped_stale_sessions,
     }
+
+
+def _finalize_terminal(
+    adapter: TmuxHarnessAdapter,
+    *,
+    repo: Path,
+    run_json: Path,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    session_name: str,
+    started_at: str,
+    before_head: str | None,
+    worker_tools: tuple[str, ...],
+    repair: dict[str, Any],
+    terminal_gate: GateDecision,
+) -> dict[str, Any]:
+    """Record a slice's terminal outcome: the single end-of-slice transition.
+
+    Both execution paths finish every slice through this function — pass,
+    integrity/trust stops, budget/breaker terminals, and the batch driver's
+    forced terminals (timeout, interrupt, refused repair delivery). It tears
+    down the session, appends the slice entry, clears current_slice, and
+    writes the pass/stop state.
+    """
+    adapter.force_stop(session_name)
+    entry = slice_entry_from_gate(
+        repo,
+        plan_slice,
+        slice_artifact_dir,
+        started_at,
+        terminal_gate,
+        before_head,
+        worker_tools,
+        # Only a slice that actually consumed repair rounds records them; a
+        # first-attempt terminal keeps the pre-repair-loop entry shape.
+        repair=dict(repair) if repair["round"] else None,
+    )
+    state["slices"].append(entry)
+    state["current_slice"] = None
+    if terminal_gate.status == "pass":
+        state["status"] = idle_status_after_pass(state)
+        state["stop_reason"] = None
+        write_run(run_json, state)
+        return {"finalized": True, "status": "pass", "reason": terminal_gate.reason, "entry": entry}
+    update_state_for_stop(run_json, state, normalize_stop_status(terminal_gate.status), terminal_gate.reason)
+    return {"finalized": True, "status": terminal_gate.status, "reason": terminal_gate.reason, "entry": entry}
 
 
 def finalize_model_supervised_slice(
@@ -360,26 +417,20 @@ def finalize_model_supervised_slice(
     max_repairs = int(state.get("policy", {}).get("max_repair_attempts", DEFAULT_MAX_REPAIR_ATTEMPTS))
 
     def finalize_terminal(terminal_gate: GateDecision) -> dict[str, Any]:
-        adapter.force_stop(session_name)
-        entry = slice_entry_from_gate(
-            repo,
-            plan_slice,
-            slice_artifact_dir,
-            started_at,
-            terminal_gate,
-            before_head,
-            worker_tools,
-            repair=dict(repair) if repair["round"] else None,
+        return _finalize_terminal(
+            adapter,
+            repo=repo,
+            run_json=run_json,
+            state=state,
+            plan_slice=plan_slice,
+            slice_artifact_dir=slice_artifact_dir,
+            session_name=session_name,
+            started_at=started_at,
+            before_head=before_head,
+            worker_tools=worker_tools,
+            repair=repair,
+            terminal_gate=terminal_gate,
         )
-        state["slices"].append(entry)
-        state["current_slice"] = None
-        if terminal_gate.status == "pass":
-            state["status"] = idle_status_after_pass(state)
-            state["stop_reason"] = None
-            write_run(run_json, state)
-            return {"finalized": True, "status": "pass", "reason": terminal_gate.reason, "entry": entry}
-        update_state_for_stop(run_json, state, normalize_stop_status(terminal_gate.status), terminal_gate.reason)
-        return {"finalized": True, "status": terminal_gate.status, "reason": terminal_gate.reason, "entry": entry}
 
     if gate.status != "repairable":
         # pass, or a terminal decision (integrity/trust breaches and the
@@ -548,280 +599,224 @@ def _repair_delivery_message(plan_slice: PlanSlice, repair_prompt_path: Path) ->
     )
 
 
+def _forced_batch_terminal(
+    args: argparse.Namespace,
+    repo: Path,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    run_dir: Path,
+    terminal_gate: GateDecision,
+    *,
+    capture_evidence: bool = True,
+) -> dict[str, Any]:
+    """Force a terminal outcome for the live batch slice from persisted state.
+
+    Used by the batch driver for conditions the shared finalize path never
+    gates: timeout, interrupt, unexpected exception, refused repair delivery.
+    Every input comes from the persisted current_slice — the canonical record —
+    not from driver locals (the entry's worker_tools is what a later reconcile
+    recovers, and before_head is the cumulative slice boundary).
+    """
+    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+    if not current:
+        raise McError("run has no current slice to force-terminate")
+    slice_artifact_dir = _slice_artifact_dir(repo, current)
+    session_name = str(current.get("tmux_session") or "")
+    before_head = str(current.get("before_head") or "") or None
+    orchestrator_session_id = current.get("orchestrator_session_id")
+    worker_tools_value = current.get("worker_tools")
+    adapter = _current_adapter(args, repo, state)
+    if capture_evidence:
+        _capture_failure_evidence(
+            adapter,
+            session_name=session_name,
+            harness_name=state["harness"]["name"],
+            repo=repo,
+            orchestrator_session_id=str(orchestrator_session_id) if orchestrator_session_id else None,
+            slice_artifact_dir=slice_artifact_dir,
+            attempt=int(current.get("attempt") or 1),
+            before_head=before_head,
+        )
+    return _finalize_terminal(
+        adapter,
+        repo=repo,
+        run_json=run_dir / "run.json",
+        state=state,
+        plan_slice=plan_slice,
+        slice_artifact_dir=slice_artifact_dir,
+        session_name=session_name,
+        started_at=str(current.get("started_at") or utc_now()),
+        before_head=before_head,
+        worker_tools=tuple(worker_tools_value) if isinstance(worker_tools_value, list) else (),
+        repair=repair_state(current),
+        terminal_gate=terminal_gate,
+    )
+
+
 def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], plan_slice: PlanSlice, run_dir: Path) -> int:
-    run_json = run_dir / "run.json"
-    if not _check_runtime_start_preconditions(repo, state, plan_slice, run_json):
+    """Deterministic batch driver: the model-supervised primitives under a fixed policy.
+
+    One engine, two drivers: this sequences the same start / wait / finalize
+    primitives the model-supervised commands expose, with every judgment call
+    replaced by a fixed rule — a wait is never interrupted for hard-signal
+    heuristics (send-time refusal is the unconditional safety boundary),
+    in-session repairs are delivered immediately, and timeout / interrupt /
+    unexpected exception become forced fail-closed terminals.
+    """
+    try:
+        started = start_model_supervised_slice(
+            args, repo, state, plan_slice, run_dir, supervision_mode="deterministic-batch"
+        )
+    except BaseException as exc:
+        recovered = load_run(run_dir)
+        if isinstance(recovered.get("current_slice"), dict):
+            # The exception escaped start's own launch handler after
+            # current_slice was persisted (e.g. KeyboardInterrupt mid-launch,
+            # which is not an Exception): fail closed instead of orphaning the
+            # recorded session.
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            outcome = _forced_batch_terminal(
+                args,
+                repo,
+                recovered,
+                plan_slice,
+                run_dir,
+                GateDecision(
+                    "cancelled" if interrupted else "failed",
+                    "interrupted by user" if interrupted else (str(exc) or repr(exc)),
+                ),
+            )
+            print(f"{plan_slice.slice_id} stopped: {outcome['reason']}")
+            return 2
+        if str(recovered.get("status")) in RUN_STOP_STATUSES:
+            # start's launch handler already captured evidence, tore the
+            # session down, and wrote the terminal stop state before re-raising.
+            print(f"{plan_slice.slice_id} stopped: {recovered.get('stop_reason')}")
+            return 2
+        # Pre-persist setup failure: nothing launched, nothing recorded —
+        # propagate exactly as the CLI expects for a refused configuration.
+        raise
+    if not started.get("started"):
         return 2
 
-    slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
-    harness_name = state["harness"]["name"]
-    configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
-    harness_model = getattr(args, "harness_model", None)
-    harness_effort = getattr(args, "harness_effort", None)
-    if harness_model:
-        state.setdefault("harness", {})["model_requested"] = harness_model
-    if harness_effort:
-        state.setdefault("harness", {})["effort_requested"] = harness_effort
-    if harness_model or harness_effort:
-        write_run(run_json, state)
-    credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
-    for warning in credential_warnings:
-        print(f"warning: {warning}")
-    prompt_path = slice_artifact_dir / "prompt.md"
-    prompt_path.write_text(
-        render_orchestrator_prompt(
-            state,
-            plan_slice,
-            slice_artifact_dir,
-            run_json,
-            configured_worker_tools,
-            getattr(args, "worker_model", None),
-            getattr(args, "worker_effort", None),
-        ),
-        encoding="utf-8",
-    )
-
-    # Repair budget counts repairable gate failures handled (in-session nudge,
-    # fresh-session escalation, or dead-session relaunch), enforced from the
-    # persisted current_slice.repair round counter — not from counting slice
-    # entries, which in-session repairs deliberately do not append.
-    max_repairs = int(state.get("policy", {}).get("max_repair_attempts", DEFAULT_MAX_REPAIR_ATTEMPTS))
-    repair = default_repair_state()
-    repair["session_generation"] = 0  # incremented to 1 at the first launch
-    last_gate: GateDecision | None = None
-    slice_start_head: str | None = None
-    started_at = utc_now()
-
-    while True:  # one iteration per tmux session (session generation)
-        repair["session_generation"] += 1
-        generation = int(repair["session_generation"])
-        # A fresh session id per generation: reusing one id across a fresh
-        # session would collide with the previous session's Claude transcript.
-        orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
-        adapter = TmuxHarnessAdapter(
-            harness_name,
-            resolve_harness_command(args, repo, state, orchestrator_session_id),
-            getattr(args, "allow_unattended_default", False),
-            configured_worker_tools,
-        )
-        if generation == 1:
-            _announce_launch(adapter, args)
-
-        started_at = utc_now()
-        before_head = git_head(repo)
-        if slice_start_head is None:
-            slice_start_head = before_head
-        before_status = git_status_text(repo)
-        (slice_artifact_dir / f"git-status-before-attempt-{generation}.txt").write_text(before_status, encoding="utf-8")
-        (slice_artifact_dir / "git-status-before.txt").write_text(before_status, encoding="utf-8")
-        session_name = tmux_session_name(state["run_id"], plan_slice, generation)
-        state["status"] = "running"
-        state["current_slice"] = current_slice_state(
-            repo,
-            plan_slice,
-            slice_artifact_dir,
-            session_name,
-            generation,
-            started_at,
-            before_head,
-            orchestrator_session_id,
-            configured_worker_tools,
-            repair,
-        )
-        reset_slice_pause_counters(state)
-        state["stop_reason"] = None
-        write_run(run_json, state)
-
-        relaunch = False
-        try:
-            result_path = slice_artifact_dir / "orchestrator-result.json"
-            if result_path.exists():
-                result_path.unlink()
-            adapter.start(repo, session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
-            adapter.send_prompt(session_name, prompt_path)
-            previous_capture = ""
-            activity_log = slice_artifact_dir / f"activity-attempt-{generation}.jsonl"
-            live_capture_path = slice_artifact_dir / f"pane-capture-live-attempt-{generation}.txt"
-            deadline = time.monotonic() + float(args.timeout_seconds)
-            while True:  # one iteration per verify/repair round in this session
-                timed_out = False
-                while True:
-                    # Always record at least one activity snapshot before
-                    # deciding, even if the result already landed: audit
-                    # evidence should not depend on winning a race against a
-                    # fast-finishing harness.
-                    activity = adapter.detect_activity(session_name, previous_capture)
-                    previous_capture = str(activity.get("capture", ""))
-                    if previous_capture:
-                        live_capture_path.write_text(previous_capture, encoding="utf-8")
-                        (slice_artifact_dir / "pane-capture-live-latest.txt").write_text(previous_capture, encoding="utf-8")
-                    with activity_log.open("a", encoding="utf-8") as handle:
-                        handle.write(
-                            json.dumps(
-                                {
-                                    "checked_at": utc_now(),
-                                    "running": bool(activity.get("running")),
-                                    "active": bool(activity.get("active")),
-                                },
-                                sort_keys=True,
-                            )
-                            + "\n"
-                        )
-                    if result_path.exists() or not activity.get("running"):
-                        break
-                    if time.monotonic() >= deadline:
-                        timed_out = True
-                        break
-                    time.sleep(float(args.poll_seconds))
-
-                adapter.capture(session_name, slice_artifact_dir / f"pane-capture-attempt-{generation}.txt")
-                (slice_artifact_dir / "pane-capture.txt").write_text(
-                    (slice_artifact_dir / f"pane-capture-attempt-{generation}.txt").read_text(encoding="utf-8"),
-                    encoding="utf-8",
+    try:
+        deadline = time.monotonic() + float(args.timeout_seconds)
+        while True:  # one iteration per wait/finalize round
+            state = load_run(run_dir)
+            current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+            if not current:
+                raise McError("batch driver lost the current slice mid-run")
+            slice_artifact_dir = _slice_artifact_dir(repo, current)
+            attempt = int(current.get("attempt") or 1)
+            session_name = str(current.get("tmux_session") or "")
+            reason, _snapshot = wait_observing(
+                args,
+                repo,
+                run_dir,
+                max(0.0, deadline - time.monotonic()),
+                activity_log=slice_artifact_dir / f"activity-attempt-{attempt}.jsonl",
+                stop_on_hard_signals=False,
+            )
+            if reason == "timeout":
+                # Legacy timeout evidence order: final pane state and
+                # transcript first, then a stop request, then the post-stop
+                # pane and cumulative git evidence against the slice boundary.
+                adapter = _current_adapter(args, repo, state)
+                orchestrator_session_id = current.get("orchestrator_session_id")
+                attempt_capture = slice_artifact_dir / f"pane-capture-attempt-{attempt}.txt"
+                adapter.capture(session_name, attempt_capture)
+                if attempt_capture.exists():
+                    (slice_artifact_dir / "pane-capture.txt").write_text(
+                        attempt_capture.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                capture_orchestrator_transcript(
+                    state["harness"]["name"],
+                    repo,
+                    str(orchestrator_session_id) if orchestrator_session_id else None,
+                    slice_artifact_dir,
                 )
-                capture_orchestrator_transcript(harness_name, repo, orchestrator_session_id, slice_artifact_dir)
                 capture_worker_runs_summary(slice_artifact_dir)
-                if timed_out:
-                    adapter.request_stop(session_name)
-                    time.sleep(min(float(args.poll_seconds), 1.0))
-                    adapter.capture(session_name, slice_artifact_dir / "pane-capture-timeout.txt")
-                    _capture_git_evidence(repo, slice_artifact_dir, generation, slice_start_head)
-                    last_gate = GateDecision("blocked", "timeout waiting for orchestrator-result.json")
-                    break
-                # git-diff.patch is written against the slice starting commit
-                # so the final evidence stays cumulative across repair commits
-                # and fresh-session generations, matching what the gate checks.
-                after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, generation, slice_start_head)
-                # Verified against the slice starting commit, not this
-                # session's launch HEAD: a repair round or relaunch may follow
-                # earlier legitimate commits, and the gate must see the
-                # cumulative slice diff (MC accepts final verified state, not
-                # commit count).
-                last_gate = verify_gate(
-                    repo, state, plan_slice, slice_artifact_dir, slice_start_head, after_head, after_status, configured_worker_tools
-                )
-                if last_gate.status != "repairable":
-                    # pass, or a terminal decision (integrity/trust breaches
-                    # and orchestrator's own considered stops): no repair.
-                    break
-
-                signature = last_gate.signature or "orchestrator-repairable"
-                session_alive = adapter.session_exists(session_name)
-                mode, terminal_gate = resolve_repair_action(
-                    repair, signature, session_alive, max_repairs, last_gate, plan_slice.slice_id
-                )
-                if terminal_gate is not None:
-                    last_gate = terminal_gate
-                    break
-                round_number = int(repair["round"])
-                _record_repair_round_evidence(adapter, session_name, slice_artifact_dir, round_number, after_status)
-                state["current_slice"]["repair"] = dict(repair)
-                write_run(run_json, state)
-                append_operational_event(
+                adapter.request_stop(session_name)
+                time.sleep(min(float(args.poll_seconds), 1.0))
+                adapter.capture(session_name, slice_artifact_dir / "pane-capture-timeout.txt")
+                _capture_git_evidence(repo, slice_artifact_dir, attempt, str(current.get("before_head") or "") or None)
+                outcome = _forced_batch_terminal(
+                    args,
                     repo,
                     state,
-                    {
-                        "kind": "repair",
-                        "slice_id": plan_slice.slice_id,
-                        "round": round_number,
-                        "signature": signature,
-                        "mode": mode,
-                        "tmux_session": session_name,
-                        "gate_reason": last_gate.reason,
-                    },
+                    plan_slice,
+                    run_dir,
+                    GateDecision("blocked", "timeout waiting for orchestrator-result.json"),
+                    capture_evidence=False,
                 )
-                if mode == "in-session":
-                    repair_prompt_text = render_repair_prompt(
-                        plan_slice, slice_artifact_dir, last_gate, before_head=slice_start_head
+                print(f"{plan_slice.slice_id} stopped: {outcome['reason']}")
+                return 2
+
+            # result-ready or process-exited: gate through the shared finalize.
+            state = load_run(run_dir)
+            outcome = finalize_model_supervised_slice(args, repo, state, plan_slice, run_dir)
+            if outcome.get("finalized"):
+                if outcome.get("status") == "pass":
+                    print(f"{plan_slice.slice_id} passed MC gates.")
+                    return 0
+                print(f"{plan_slice.slice_id} stopped: {outcome.get('reason')}")
+                return 2
+            if outcome.get("mode") == "in-session":
+                # Deliver the repair immediately — the fixed-policy equivalent
+                # of the model-supervised send step. finalize advanced and
+                # persisted the repair state, so round and signature come from
+                # its return value, not pre-finalize locals.
+                state = load_run(run_dir)
+                current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+                if not current:
+                    raise McError("batch driver lost the current slice during in-session repair")
+                repair_after = outcome.get("repair") if isinstance(outcome.get("repair"), dict) else repair_state(current)
+                round_number = int(repair_after.get("round") or 0)
+                adapter = _current_adapter(args, repo, state)
+                session_name = str(current.get("tmux_session") or "")
+                try:
+                    adapter.send_literal(session_name, str(outcome.get("send_text") or ""))
+                except McError as exc:
+                    # send_literal refuses when a hard prompt / hard-stop hint
+                    # is on screen. That refusal must stop the run with
+                    # evidence, never surface as an uncaught exception that
+                    # orphans it.
+                    adapter.capture(
+                        session_name,
+                        _slice_artifact_dir(repo, current) / f"pane-capture-repair-refused-{round_number}.txt",
                     )
-                    repair_prompt_path = slice_artifact_dir / f"repair-prompt-repair-{round_number}.md"
-                    repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
-                    (slice_artifact_dir / "repair-prompt.md").write_text(repair_prompt_text, encoding="utf-8")
-                    try:
-                        adapter.send_literal(session_name, _repair_delivery_message(plan_slice, repair_prompt_path))
-                    except McError as exc:
-                        # send_literal refuses when a hard prompt / hard-stop
-                        # hint is on screen. That refusal must stop the run
-                        # with evidence, never surface as an uncaught
-                        # exception that orphans it.
-                        adapter.capture(
-                            session_name, slice_artifact_dir / f"pane-capture-repair-refused-{round_number}.txt"
-                        )
-                        last_gate = GateDecision(
+                    outcome = _forced_batch_terminal(
+                        args,
+                        repo,
+                        state,
+                        plan_slice,
+                        run_dir,
+                        GateDecision(
                             "needs-human",
                             f"repair prompt could not be delivered into the live session: {exc}",
-                            last_gate.result,
-                            last_gate.actual_changed_files,
-                            signature,
-                        )
-                        break
-                    # Each repair round gets a fresh timeout window for the
-                    # orchestrator to respond with a new result.
-                    deadline = time.monotonic() + float(args.timeout_seconds)
-                    continue
-                relaunch = True
-                break
-        except KeyboardInterrupt:
-            _capture_failure_evidence(
-                adapter,
-                session_name=session_name,
-                harness_name=harness_name,
-                repo=repo,
-                orchestrator_session_id=orchestrator_session_id,
-                slice_artifact_dir=slice_artifact_dir,
-                attempt=generation,
-                before_head=slice_start_head,
-            )
-            last_gate = GateDecision("cancelled", "interrupted by user")
-        except Exception as exc:
-            # Any failure — an McError from the harness/tmux path or an
-            # unexpected exception — must not orphan the tmux session or leave
-            # run.json stuck at "running". Capture whatever evidence exists and
-            # record a failed gate so the run stops fail-closed. force_stop runs
-            # in the finally block below regardless of which path we took.
-            _capture_failure_evidence(
-                adapter,
-                session_name=session_name,
-                harness_name=harness_name,
-                repo=repo,
-                orchestrator_session_id=orchestrator_session_id,
-                slice_artifact_dir=slice_artifact_dir,
-                attempt=generation,
-                before_head=slice_start_head,
-            )
-            last_gate = GateDecision("failed", str(exc) or repr(exc))
-        finally:
-            # Reached only when this session is finished with — pass, a
-            # terminal decision, an escalation/relaunch, or an exception.
-            # In-session repair rounds never leave the try block, so the live
-            # session survives them.
-            adapter.force_stop(session_name)
-
-        if relaunch:
-            continue
-        break
-
-    fallback = last_gate or GateDecision("blocked", "slice ended without a gate decision")
-    entry = slice_entry_from_gate(
-        repo,
-        plan_slice,
-        slice_artifact_dir,
-        started_at,
-        fallback,
-        slice_start_head,
-        configured_worker_tools,
-        # Only a slice that actually consumed repair rounds records them; a
-        # first-attempt pass keeps the pre-repair-loop entry shape.
-        repair=dict(repair) if repair["round"] else None,
-    )
-    state["slices"].append(entry)
-    state["current_slice"] = None
-    if fallback.status == "pass":
-        state["status"] = idle_status_after_pass(state)
-        state["stop_reason"] = None
-        write_run(run_json, state)
-        print(f"{plan_slice.slice_id} passed MC gates.")
-        return 0
-    update_state_for_stop(run_json, state, normalize_stop_status(fallback.status), fallback.reason)
-    print(f"{plan_slice.slice_id} stopped: {fallback.reason}")
-    return 2
+                            signature=str(repair_after.get("last_signature") or ""),
+                        ),
+                    )
+                    print(f"{plan_slice.slice_id} stopped: {outcome['reason']}")
+                    return 2
+            # in-session (delivered), fresh-session, or relaunch: the slice is
+            # still live in whichever session finalize chose; each repair round
+            # gets a fresh timeout window for the orchestrator to respond.
+            deadline = time.monotonic() + float(args.timeout_seconds)
+    except KeyboardInterrupt:
+        outcome = _forced_batch_terminal(
+            args, repo, load_run(run_dir), plan_slice, run_dir, GateDecision("cancelled", "interrupted by user")
+        )
+        print(f"{plan_slice.slice_id} stopped: {outcome['reason']}")
+        return 2
+    except Exception as exc:
+        # Any failure — an McError from the harness/tmux path, a finalize
+        # refusal, or an unexpected exception — must not orphan the tmux
+        # session or leave run.json stuck at "running". The forced terminal
+        # captures whatever evidence exists and records a failed entry so the
+        # run stops fail-closed.
+        outcome = _forced_batch_terminal(
+            args, repo, load_run(run_dir), plan_slice, run_dir, GateDecision("failed", str(exc) or repr(exc))
+        )
+        print(f"{plan_slice.slice_id} stopped: {outcome['reason']}")
+        return 2
