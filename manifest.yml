@@ -59,3 +59,8 @@ tool_links:
     config_dir: ~/.copilot
     instructions_link: copilot-instructions.md
     skills_link: skills
+
+  - name: qwen
+    config_dir: ~/.qwen
+    instructions_link: QWEN.md
+    skills_link: skills

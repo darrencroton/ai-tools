@@ -2,7 +2,7 @@
 
 Private bootstrap and configuration home for coding-agent harnesses.
 
-This repo owns my global `AGENTS.md`, setup script, manifest, and private/local skills. It composes skills from external repos into one canonical skill catalogue at `~/.agents/skills` and links Claude Code, Codex, OpenCode, Copilot, and related tools to the same shared agent environment.
+This repo owns my global `AGENTS.md`, setup script, manifest, and private/local skills. It composes skills from external repos into one canonical skill catalogue at `~/.agents/skills` and links Claude Code, Codex, OpenCode, Copilot, Qwen Code, and related tools to the same shared agent environment.
 
 ## Layout
 
@@ -30,6 +30,8 @@ This repo owns my global `AGENTS.md`, setup script, manifest, and private/local 
 ~/.config/opencode/skills          -> ~/.agents/skills
 ~/.copilot/copilot-instructions.md -> ~/.agents/AGENTS.md
 ~/.copilot/skills                  -> ~/.agents/skills
+~/.qwen/QWEN.md                    -> ~/.agents/AGENTS.md
+~/.qwen/skills                     -> ~/.agents/skills
 ```
 
 The public reusable skills live in [`ai-agent-coder`](https://github.com/darrencroton/ai-agent-coder); this repo clones and composes them via the manifest. This repo itself is the base install — it is not listed as a repo dependency in its own manifest.
