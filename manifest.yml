@@ -33,8 +33,8 @@
 agent_home: ~/.agents
 
 repos:
-  - name: ai-engineering-skills
-    url: git@github.com:darrencroton/ai-engineering-skills.git
+  - name: ai-agent-coder
+    url: git@github.com:darrencroton/ai-agent-coder.git
     branch: main
     enabled: true
     update: true

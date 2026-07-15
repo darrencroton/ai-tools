@@ -13,10 +13,10 @@ This repo owns my global `AGENTS.md`, setup script, manifest, and private/local 
   manifest.yml             declarative config: repos to clone, tools to link
   home-skills/             physical private/local skills owned by this repo
   repos/                   external skill repo clones (gitignored, managed by setup)
-    ai-engineering-skills/
+    ai-agent-coder/
   skills/                  composed public skill catalogue (gitignored, generated)
     <private-skill>  -> ../home-skills/<private-skill>
-    <public-skill>   -> ../repos/ai-engineering-skills/skills/<public-skill>
+    <public-skill>   -> ../repos/ai-agent-coder/skills/<public-skill>
 ```
 
 `~/.agents/skills` is the only public skill surface. Every harness points at it — never directly at `home-skills/` or a repo's `skills/` directory:
@@ -32,7 +32,7 @@ This repo owns my global `AGENTS.md`, setup script, manifest, and private/local 
 ~/.copilot/skills                  -> ~/.agents/skills
 ```
 
-The public reusable skills live in [`ai-engineering-skills`](https://github.com/darrencroton/ai-engineering-skills); this repo clones and composes them via the manifest. This repo itself is the base install — it is not listed as a repo dependency in its own manifest.
+The public reusable skills live in [`ai-agent-coder`](https://github.com/darrencroton/ai-agent-coder); this repo clones and composes them via the manifest. This repo itself is the base install — it is not listed as a repo dependency in its own manifest.
 
 ## Install
 
@@ -67,7 +67,7 @@ Duplicate skill names across sources abort the run before any catalogue change; 
 ## Adding skills
 
 - **Private/local skill**: create `home-skills/<name>/SKILL.md`, re-run `./setup.sh`.
-- **Public skill**: add it to `ai-engineering-skills` (or another manifest repo), push, re-run `./setup.sh`.
+- **Public skill**: add it to `ai-agent-coder` (or another manifest repo), push, re-run `./setup.sh`.
 
 ## Validation
 
