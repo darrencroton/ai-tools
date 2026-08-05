@@ -34,3 +34,8 @@ private/
 .claude/
 .agents/
 .ai-orchestrator/
+
+# Centralized per-tool settings/hooks — these are rewritten by the tools
+# themselves at runtime (timestamps, cached state), so they sync via iCloud
+# on the physical repo directory rather than via git commits.
+home-config/

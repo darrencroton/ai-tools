@@ -29,6 +29,18 @@
 #                  <instructions_link> -> <agent_home>/AGENTS.md
 #                  <skills_link>       -> <agent_home>/skills
 #                Tools whose config_dir does not exist are skipped.
+#
+#   config_links individual settings/hook files centralized under
+#                <agent_home>/home-config/ and linked back out to their
+#                native per-tool location.
+#                  name   label used in setup.sh output (required)
+#                  src    path relative to <agent_home> (required)
+#                  dst    native destination path, ~ expanded (required)
+#                Only use this for files that are pure preference/config, not
+#                files a tool treats as machine-local mutable state (trust
+#                lists, install caches, timestamps) — those don't belong
+#                here. dst's parent directory must already exist; entries
+#                whose dst parent is missing are skipped.
 
 agent_home: ~/.agents
 
@@ -64,3 +76,28 @@ tool_links:
     config_dir: ~/.qwen
     instructions_link: QWEN.md
     skills_link: skills
+
+config_links:
+  - name: claude-settings
+    src: home-config/claude/settings.json
+    dst: ~/.claude/settings.json
+
+  - name: claude-hook-pm-poll-guard
+    src: home-config/claude/hooks/pm-poll-guard.py
+    dst: ~/.claude/hooks/pm-poll-guard.py
+
+  - name: claude-statusline
+    src: home-config/claude/statusline-command.sh
+    dst: ~/.claude/statusline-command.sh
+
+  - name: copilot-settings
+    src: home-config/copilot/settings.json
+    dst: ~/.copilot/settings.json
+
+  - name: qwen-settings
+    src: home-config/qwen/settings.json
+    dst: ~/.qwen/settings.json
+
+  - name: opencode-settings
+    src: home-config/opencode/opencode.json
+    dst: ~/.config/opencode/opencode.json

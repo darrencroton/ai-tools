@@ -156,6 +156,7 @@ field() {
 AGENT_HOME_RAW="~/.agents"
 REPO_RECORDS=()
 TOOL_RECORDS=()
+CONFIG_RECORDS=()
 
 while IFS= read -r line; do
     section="${line%%$'\t'*}"
@@ -163,8 +164,9 @@ while IFS= read -r line; do
     case "$section" in
         scalar)
             [[ "$record" == agent_home=* ]] && AGENT_HOME_RAW="${record#agent_home=}" ;;
-        repos)      REPO_RECORDS+=("$record") ;;
-        tool_links) TOOL_RECORDS+=("$record") ;;
+        repos)        REPO_RECORDS+=("$record") ;;
+        tool_links)   TOOL_RECORDS+=("$record") ;;
+        config_links) CONFIG_RECORDS+=("$record") ;;
     esac
 done < <(parse_manifest)
 
@@ -453,6 +455,35 @@ for record in ${TOOL_RECORDS[@]+"${TOOL_RECORDS[@]}"}; do
     fi
     ensure_link "$AGENT_HOME/AGENTS.md" "$config_dir/$instructions_link"
     ensure_link "$AGENT_HOME/skills" "$config_dir/$skills_link"
+done
+
+# ── 5. Config links ──────────────────────────────────────────────────────────
+# Individual settings/hook files centralized under home-config/ and linked
+# back to their native per-tool location. Unlike tool_links, dst's parent
+# directory is required to already exist (these are files inside a tool's
+# own config dir, not a dir we'd want setup.sh creating on its behalf).
+
+say ""
+say "Config links..."
+
+for record in ${CONFIG_RECORDS[@]+"${CONFIG_RECORDS[@]}"}; do
+    name="$(field "$record" name '?')"
+    src_rel="$(field "$record" src)"
+    dst="$(expand_tilde "$(field "$record" dst)")"
+
+    if [[ -z "$src_rel" || -z "$dst" ]]; then
+        fail "manifest config_links entry incomplete: $record"
+        continue
+    fi
+
+    say ""
+    say "    [$name] $dst"
+    dst_dir="$(dirname "$dst")"
+    if [[ ! -d "$dst_dir" ]]; then
+        note "parent dir $dst_dir not found — tool not installed, skipping"
+        continue
+    fi
+    ensure_link "$AGENT_HOME/$src_rel" "$dst"
 done
 
 # ── Summary ──────────────────────────────────────────────────────────────────

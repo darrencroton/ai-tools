@@ -12,6 +12,11 @@ This repo owns my global `AGENTS.md`, setup script, manifest, and private/local 
   setup.sh                 idempotent bootstrap/maintenance script
   manifest.yml             declarative config: repos to clone, tools to link
   home-skills/             physical private/local skills owned by this repo
+  home-config/             physical per-tool settings/hook files (gitignored)
+    claude/settings.json, claude/hooks/pm-poll-guard.py, claude/statusline-command.sh
+    copilot/settings.json
+    qwen/settings.json
+    opencode/opencode.json
   repos/                   external skill repo clones (gitignored, managed by setup)
     ai-agent-coder/
   skills/                  composed public skill catalogue (gitignored, generated)
@@ -33,6 +38,19 @@ This repo owns my global `AGENTS.md`, setup script, manifest, and private/local 
 ~/.qwen/QWEN.md                    -> ~/.agents/AGENTS.md
 ~/.qwen/skills                     -> ~/.agents/skills
 ```
+
+A second, narrower mechanism (`config_links` in the manifest) centralizes individual per-tool settings/hook files the same way:
+
+```text
+~/.claude/settings.json             -> ~/.agents/home-config/claude/settings.json
+~/.claude/hooks/pm-poll-guard.py    -> ~/.agents/home-config/claude/hooks/pm-poll-guard.py
+~/.claude/statusline-command.sh     -> ~/.agents/home-config/claude/statusline-command.sh
+~/.copilot/settings.json            -> ~/.agents/home-config/copilot/settings.json
+~/.qwen/settings.json               -> ~/.agents/home-config/qwen/settings.json
+~/.config/opencode/opencode.json    -> ~/.agents/home-config/opencode/opencode.json
+```
+
+Only use `config_links` for files that are pure preference/config. Files a tool treats as machine-local mutable state (e.g. Codex's `config.toml`, which mixes real settings with an auto-growing per-machine trusted-projects list and a local notify-app path) should stay native rather than being centralized. `home-config/` itself is gitignored — these files get rewritten by the tools at runtime (timestamps, cached state), so they sync across Macs via iCloud on the physical repo directory, not via git commits.
 
 The public reusable skills live in [`ai-agent-coder`](https://github.com/darrencroton/ai-agent-coder); this repo clones and composes them via the manifest. This repo itself is the base install — it is not listed as a repo dependency in its own manifest.
 
@@ -64,7 +82,7 @@ Duplicate skill names across sources abort the run before any catalogue change; 
 
 ## Manifest
 
-`manifest.yml` declares the agent home path, the external skill repos to clone under `repos/` (with per-repo `branch`, `enabled`, `update`), and the tool config directories to link. See the comment header in [`manifest.yml`](manifest.yml) for the exact (deliberately constrained) format. Adding a new harness or skill repo is one manifest entry plus a re-run of `setup.sh`.
+`manifest.yml` declares the agent home path, the external skill repos to clone under `repos/` (with per-repo `branch`, `enabled`, `update`), the tool config directories to link, and individual settings/hook files to centralize under `home-config/`. See the comment header in [`manifest.yml`](manifest.yml) for the exact (deliberately constrained) format. Adding a new harness, skill repo, or centralized settings file is one manifest entry plus a re-run of `setup.sh`.
 
 ## Adding skills
 
@@ -86,6 +104,13 @@ readlink ~/.claude/skills
 readlink ~/.codex/AGENTS.md
 readlink ~/.config/opencode/skills
 readlink ~/.copilot/copilot-instructions.md
+
+readlink ~/.claude/settings.json
+readlink ~/.claude/hooks/pm-poll-guard.py
+readlink ~/.claude/statusline-command.sh
+readlink ~/.copilot/settings.json
+readlink ~/.qwen/settings.json
+readlink ~/.config/opencode/opencode.json
 ```
 
 ## Files
