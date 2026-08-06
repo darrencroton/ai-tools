@@ -82,8 +82,13 @@ config_links:
     src: home-config/claude/settings.json
     dst: ~/.claude/settings.json
 
+  # Linked straight from the skill repo rather than copied into home-config:
+  # the hook is code the project-manager skill owns and ships tests for, so a
+  # private copy here drifts from it silently. It did — the live hook sat well
+  # behind the repo and nothing surfaced the gap. Tracking the repo makes the
+  # hook behave like the rest of the skill, which is already linked this way.
   - name: claude-hook-pm-poll-guard
-    src: home-config/claude/hooks/pm-poll-guard.py
+    src: repos/ai-agent-coder/skills/project-manager/hooks/pm-poll-guard.py
     dst: ~/.claude/hooks/pm-poll-guard.py
 
   - name: claude-statusline
