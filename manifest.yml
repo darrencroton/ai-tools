@@ -51,6 +51,17 @@ repos:
     enabled: true
     update: true
 
+  # Paper-writing skills for astronomy. Exposes paper-start, paper-draft and
+  # paper-lit; skills/_shared/ has no SKILL.md and is correctly not linked as a
+  # skill, staying reachable as ../_shared/ from each linked skill. tools/ and
+  # skeleton/ sit above skills/ and are resolved from the skill path — see that
+  # repo's skills/_shared/house-rules.md, "Locating the installation".
+  - name: sci-paper
+    url: git@github.com:darrencroton/sci-paper.git
+    branch: main
+    enabled: true
+    update: true
+
 tool_links:
   - name: claude
     config_dir: ~/.claude
